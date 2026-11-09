@@ -1,0 +1,15 @@
+# Scruffy broom logo
+
+Original asset generated with the built-in image generation tool on November 8, 2026. The user's reference supplied the broom/janitor idea only; no character likeness was used. The official MILL5 wordmark remains separate in the sidebar.
+
+Asset: `src/Scruffy/Resources/scruffy-broom.png` (transparent PNG). Used in the sidebar, welcome view, and generated app icon.
+
+The revised Dock icon is `src/Scruffy/Resources/scruffy-app-icon.png`: a brighter porcelain/ice-blue macOS tile with a larger broom, generated with the built-in image tool. The plain mark remains in the interface.
+
+## Revised app-icon prompt
+
+Create a polished native macOS Dock application icon for Scruffy using the attached original broom mark as the identity reference. Preserve the recognizable simple diagonal push broom, with MILL5 cyan #119BC5 handle and wide head, crisp off-white bristles separated by dark-slate details. Make the broom bolder, more compact and optically centered so it fills the icon generously and reads instantly at 32 px: substantial broad head, a somewhat shorter handle, no tiny debris. Set it on a luminous porcelain-white to very pale ice-blue rounded-square macOS app tile with standard continuous corners and restrained dimensional edge lighting, like a professionally finished Mac utility icon. The tile must look bright, clean and vibrant beside Finder, Notes, Mail and modern white macOS app icons, not dark. Entire icon straight-on, no perspective mockup, no surrounding scene. Square composition, icon tile inset about 8% from canvas edges with genuinely transparent outside corners; no large external shadow. Keep cyan vivid and silhouette contrast strong. No person, no face, no character, no lettering, no wordmark, no badges, no extra symbols. Deliver one finished high-resolution app icon, no grid of alternatives.
+
+## Final generation prompt
+
+Use case: logo-brand. Create one original, polished logo symbol for Scruffy, a native Mac disk cleanup app branded with MILL5 colors. Subject: a sturdy janitor's push broom alone, leaning diagonally from lower left to upper right, with a broad clean bristle head and a simple straight handle, suggesting sweeping digital clutter. No person, no face, no body, no hands, no clothes, no cartoon character, no recognizable entertainment character. Design a minimal vector-like symbol with bold clean geometry, restrained gently rounded edges, precise silhouettes, excellent legibility at 32 pixels. Palette limited to MILL5 cyan #119BC5, white/off-white, and deep slate #222B30. Cyan handle and broom housing with white bristles, deep slate negative-space details. One tiny cyan square near the broom may suggest a swept-away file, but no extra illustrations. Center the entire symbol with generous clear margins in a square canvas, fully visible and uncropped. Transparent background, no container, no tile, no shadow, no gradients, no texture, no text, no lettering, no watermark. This must be an original standalone broom logo, not the supplied cartoon janitor.
