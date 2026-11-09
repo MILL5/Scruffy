@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Meet Scruffy, a native Mac utility for reviewed cleanup, quick file search, and smaller HEVC video copies. Built by Rich Crane, Inventing Fire with AI, and MILL5.">
+  <meta name="author" content="Richard Crane">
+  <meta name="theme-color" content="#eef7fa">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Scruffy — Your Mac, minus the clutter.">
+  <meta property="og:description" content="Find what is taking up room. Review your files. Keep the choice yours. A native Mac utility from Rich Crane, Inventing Fire with AI, and MILL5.">
+  <meta property="og:url" content="https://mill5.github.io/Scruffy/">
+  <meta property="og:image" content="https://mill5.github.io/Scruffy/assets/scruffy-app-icon.png">
+  <meta property="og:image:alt" content="Scruffy's cyan broom on a bright macOS app icon">
+  <meta name="twitter:card" content="summary">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'; base-uri 'self'; object-src 'none'">
+  <link rel="canonical" href="https://mill5.github.io/Scruffy/">
+  <link rel="icon" type="image/png" href="assets/scruffy-app-icon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="script.js" defer></script>
+  <title>Scruffy — Your Mac, minus the clutter.</title>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <nav class="wrap navigation" aria-label="Main navigation">
+      <a class="brand" href="#" aria-label="Scruffy home"><img src="assets/scruffy-app-icon.png" width="44" height="44" alt=""><span>Scruffy</span></a>
+      <div class="nav-links"><a href="#cleanup">Cleanup</a><a href="#search">Search</a><a href="#videos">Videos</a><a href="#maker">The maker</a></div>
+      <a class="nav-follow" href="https://inventingfirewith.ai/">Follow the build <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="platform"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"></rect><path d="M9 21h6m-3-4v4"></path></svg> Made for your Mac</p>
+        <h1 id="hero-title">Your Mac,<br>minus the clutter.</h1>
+        <p class="hero-description">A friendly little utility for files that have overstayed their welcome. Find the extras, review the details, and decide what goes.</p>
+        <div class="hero-actions"><a class="button primary" href="#search">Take a look around <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg></a><a class="text-link" href="#safety">How Scruffy protects your files</a></div>
+        <p class="availability">Native macOS 14+. In development.<br>No public download is offered on this page.</p>
+      </div>
+      <div class="hero-art" aria-label="Scruffy's broom app icon">
+        <div class="sweep-shape"></div>
+        <img class="hero-icon" src="assets/scruffy-app-icon.png" width="430" height="430" alt="A bright macOS app icon with Scruffy’s sturdy cyan broom" fetchpriority="high">
+        <div class="hero-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg><span>Your files.<br><strong>Your call.</strong></span></div>
+      </div>
+    </section>
+
+    <div class="promise-strip"><div class="wrap promise-inner"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6z"></path><path d="m8 12 3 3 5-6"></path></svg> Local processing</span><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6H5v15h14V6h-3M9 6V3h6v3M3 6h18m-11 4v7m4-7v7"></path></svg> Reviewed cleanup</span><span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4 21v-2a8 8 0 0 1 16 0v2"></path></svg> No account or analytics</span></div></div>
+
+    <section class="cleanup-section wrap section-space" id="cleanup" aria-labelledby="cleanup-title">
+      <div class="section-heading"><h2 id="cleanup-title">A clearer picture.<br>A considered clean.</h2><p>Start with the files worth a second look. Scruffy puts the biggest items first and leaves every selection to you.</p></div>
+      <div class="cleanup-grid">
+        <article class="cleanup-item"><div class="feature-icon"><svg viewBox="0 0 32 32" aria-hidden="true"><rect x="12" y="4" width="16" height="19" rx="3"></rect><path d="M20 12H7a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3z"></path></svg></div><h3>Keep the original.</h3><p>Find identical file contents with SHA-256 verification. One original stays protected in every duplicate group.</p></article>
+        <article class="cleanup-item"><div class="feature-icon"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3v18m-7-7 7 7 7-7M5 22v6h22v-6"></path></svg></div><h3>Revisit the leftovers.</h3><p>Review old downloads, large files, browser caches, and optional developer caches and temporary files.</p></article>
+        <article class="cleanup-item"><div class="feature-icon"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 9H5v19h22V9h-3M11 9V4h10v5M3 9h26m-17 5v9m8-9v9"></path></svg></div><h3>Decide, then tidy.</h3><p>Nothing starts selected. Review your choices and confirm before ordinary file cleanup moves anything to Trash.</p></article>
+      </div>
+    </section>
+
+    <section class="search-section" id="search" aria-labelledby="search-title">
+      <div class="wrap search-layout">
+        <div class="search-copy"><h2 id="search-title">Remember a few words?<br>That’s enough.</h2><p>Search file names and paths with independent words. <strong>london zip</strong> finds both, even when they appear in a different order or different folders.</p><p>Each section remembers its own search. Keep your place as you move between downloads, duplicates, and the rest.</p><div class="try-caption"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"></path></svg><span>Try it with these example files.</span></div></div>
+        <div class="file-preview">
+          <div class="preview-titlebar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Scruffy · Example library</span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"></rect><path d="M9 4v16"></path></svg></div>
+          <form class="preview-search" role="search" id="preview-form"><label for="demo-query" class="sr-only">Search example files</label><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 5 5"></path></svg><input id="demo-query" type="search" placeholder="Try london zip" autocomplete="off" spellcheck="false" aria-describedby="demo-hint"><button type="button" id="clear-search">Clear</button></form>
+          <div class="query-examples" aria-label="Example searches"><button type="button" data-query="london zip">london zip</button><button type="button" data-query="video">video</button><button type="button" data-query="cache">cache</button></div>
+          <div class="preview-list-tools"><label><input type="checkbox" id="select-matches"> Select matching files</label><span id="match-count" role="status" aria-live="polite"></span></div>
+          <div class="example-files" id="example-files"></div>
+          <div class="preview-footer"><span id="selection-summary" role="status" aria-live="polite">0 selected in this example</span><button type="button" id="clear-selection" disabled>Clear selection</button></div>
+          <p class="demo-hint" id="demo-hint">Illustrative files only. This page does not scan or change your Mac.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="videos-section wrap section-space" id="videos" aria-labelledby="videos-title">
+      <div class="video-workflow" aria-label="Video compression workflow">
+        <div class="video-file"><div class="play-mark" aria-hidden="true"></div><span>holiday.mov</span><span class="video-file-label">Your video</span></div>
+        <div class="video-connector" aria-hidden="true"><span></span><svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"></path></svg></div>
+        <div class="video-output"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="m7 16 6 6L26 8"></path></svg><strong>HEVC copy</strong><span>Kept only if smaller</span></div>
+        <div class="video-facts"><span>Same resolution</span><span>Same supported container</span><span>Processed on your Mac</span></div>
+      </div>
+      <div class="video-copy"><h2 id="videos-title">Give big videos<br>a smaller footprint.</h2><p>A dedicated Videos section finds MP4, MOV, and M4V files. Create an HEVC copy without reducing the original resolution or changing its supported container.</p><p>Scruffy keeps the output only when it is smaller. The result depends on the source, and video re-encoding is lossy. Review the new copy before deciding what to keep.</p><p class="video-note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"></rect><path d="M9 21h6m-3-4v4"></path></svg> Native macOS encoding. No video uploads.</p></div>
+    </section>
+
+    <section class="safety-section" id="safety" aria-labelledby="safety-title"><div class="wrap safety-layout">
+      <div><img class="safety-broom" src="assets/scruffy-broom.png" width="115" height="115" alt="" loading="lazy"><h2 id="safety-title">A cleanup app<br>should know its place.</h2><p>Scruffy gives you a review, not a surprise. Scans are read-only, and ordinary file cleanup uses macOS Trash.</p></div>
+      <div class="safety-details"><details open><summary>You choose every file.</summary><p>No automatic selection or background cleaning. Files are checked again before a move, and one original in every duplicate group stays protected.</p></details><details><summary>Some places are off limits.</summary><p>Known cloud-sync folders, symlinks, hard links, app bundles, photo libraries, and sensitive system locations are excluded. Unusual sync tools and mount layouts still need your judgment.</p></details><details><summary>Trash is yours to empty.</summary><p>Scruffy never empties Trash. Moving files there does not release their space until you empty it yourself. A local recovery history helps restore moved files without overwriting existing work.</p></details><details><summary>Browser caches can wait.</summary><p>Supported browsers must close before their caches can be cleaned. A normal quit request is offered only when you explicitly choose it.</p></details><details><summary>System storage is a separate decision.</summary><p>System purge and local Time Machine snapshot reclamation bypass Trash and require their own review. Snapshot reclamation also asks for administrator approval and permanently removes some local restore points.</p></details></div>
+    </div></section>
+
+    <section class="maker-section wrap section-space" id="maker" aria-labelledby="maker-title">
+      <div class="maker-intro"><img src="assets/inventing-fire-mark.png" width="92" height="92" alt="Inventing Fire with AI" loading="lazy"><div><p class="maker-lead">From the same workshop</p><h2 id="maker-title">Built by Rich Crane.</h2><p>Scruffy is part of <a href="https://inventingfirewith.ai/">Inventing Fire with AI</a> and the family of practical software projects from Rich Crane and <a href="https://mill5.com/">MILL5</a>.</p></div></div>
+      <div class="maker-links"><a href="https://inventingfirewith.ai/" class="maker-destination"><span class="destination-mark fire-mark" aria-hidden="true">✦</span><div><h3>Inventing Fire with AI</h3><p>Projects, conversations, and ideas for building with AI.</p><span class="destination-link">Explore the workshop <span aria-hidden="true">↗</span></span></div></a><a href="https://mill5.com/" class="maker-destination mill5-destination"><span class="destination-wordmark"><img src="assets/mill5-logo.png" width="118" height="27" alt="MILL5" loading="lazy"></span><div><h3>Software. Cloud. AI.</h3><p>Meet MILL5 and explore its work building technology for businesses.</p><span class="destination-link">Visit MILL5 <span aria-hidden="true">↗</span></span></div></a></div>
+      <div class="maker-more"><p>More from Rich’s workshop</p><div><a href="https://mill5.github.io/FastSearch/">FastSearch</a><a href="https://chiefinnovator.github.io/macedgelight/">MacEdgeLight</a><a href="https://chiefinnovator.github.io/videodownloader/">Video Downloader</a></div></div>
+    </section>
+
+    <section class="closing-section"><div class="wrap closing-inner"><div><h2>A little tidier.<br>Still entirely yours.</h2><p>Follow Scruffy’s development through Inventing Fire with AI.</p></div><div class="closing-actions"><a class="button primary" href="https://inventingfirewith.ai/">Follow the build <span aria-hidden="true">↗</span></a><a class="text-link" href="mailto:rich@mill5.com">Contact Rich</a></div></div></section>
+  </main>
+
+  <footer class="site-footer"><div class="wrap footer-inner"><a class="brand footer-brand" href="#"><img src="assets/scruffy-app-icon.png" width="34" height="34" alt=""><span>Scruffy</span></a><p>© 2026 Richard Crane · MILL5. All rights reserved.</p><div><a href="https://mvp.microsoft.com/en-US/MVP/profile/10ce0bc0-7536-43f6-b28c-e9601a4a0d0d">Rich’s Microsoft MVP profile</a><a href="https://inventingfirewith.ai/">Inventing Fire with AI</a></div></div></footer>
+</body>
+</html>
