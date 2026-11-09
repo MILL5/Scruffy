@@ -198,7 +198,9 @@ struct ContentView: View {
                 Text("REVIEW FILES").font(.system(size: 10, weight: .semibold)).tracking(1.8).foregroundStyle(.secondary).padding(.top, 22).padding(.bottom, 6)
                 ForEach(CleanupCategory.allCases) { category in
                     navRow(category.rawValue, icon: category.symbol, selected: !showPurgeable && (category == .videos ? showVideos : (!showVideos && model.activeCategory == category)),
-                           count: model.count(category), bytes: model.result == nil ? nil : model.bytes(category)) {
+                           count: model.count(category), bytes: model.result == nil ? nil : model.bytes(category),
+                           selectedCount: category == .videos ? videos.chosen.count : (model.selectedCategoryCounts[category] ?? 0),
+                           selectedBytes: category == .videos ? videos.selectedBytes : (model.selectedCategoryBytes[category] ?? 0)) {
                         showPurgeable = false; showVideos = category == .videos
                         if category != .videos { model.activeCategory = category }
                     }
@@ -225,8 +227,10 @@ struct ContentView: View {
         }.padding(compact ? 14 : 22).frame(width: sidebarWidth).background(theme.sidebar)
             .overlay(alignment: .trailing) { Rectangle().fill(theme.border).frame(width: 1) }
     }
-    private func navRow(_ title: String, icon: String, selected: Bool, count: Int = 0, bytes: Int64? = nil, action: @escaping () -> Void) -> some View {
+    private func navRow(_ title: String, icon: String, selected: Bool, count: Int = 0, bytes: Int64? = nil,
+                        selectedCount: Int = 0, selectedBytes: Int64 = 0, action: @escaping () -> Void) -> some View {
         Button(action: action) {
+            VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 10) {
                 Image(systemName: icon).frame(width: 18)
                 if compact {
@@ -249,10 +253,19 @@ struct ContentView: View {
                     Text(count, format: .number).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                   }
                 }
+            }
+            if bytes != nil {
+                selectedCategoryLabel(count: selectedCount, bytes: selectedBytes).padding(.leading, 28)
+            }
             }.padding(.horizontal, compact ? 8 : 12).padding(.vertical, bytes == nil ? 9 : 6)
                 .foregroundStyle(selected ? theme.accent : theme.text.opacity(0.85))
                 .background(selected ? brandBlue.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 9))
         }.buttonStyle(.plain).disabled(purgeable.busy || videos.busy)
+    }
+    private func selectedCategoryLabel(count: Int, bytes: Int64) -> some View {
+        Label("\(count.formatted()) selected · \(formatBytes(bytes))", systemImage: count > 0 ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: 9)).monospacedDigit().lineLimit(1)
+            .foregroundStyle(count > 0 ? theme.accent : theme.text.opacity(0.5))
     }
     private var header: some View {
         Group {
@@ -312,6 +325,8 @@ struct ContentView: View {
                 Text("SPACE TO REVIEW").font(.system(size: 10, weight: .medium)).tracking(1.5).foregroundStyle(.secondary)
                 Text(formatBytes(model.summaryBytes)).font(.system(size: compact ? 27 : 38, weight: .semibold, design: .rounded))
                     .lineLimit(1).minimumScaleFactor(0.8)
+                Label("\(model.summarySelectedCount.formatted()) files · \(formatBytes(model.summarySelectedBytes)) selected", systemImage: model.summarySelectedCount > 0 ? "checkmark.circle.fill" : "circle")
+                    .font(.caption).foregroundStyle(model.summarySelectedCount > 0 ? theme.accent : theme.text.opacity(0.5))
                 Text(compact ? "Logical sizes; actual disk savings can differ." : "Logical file sizes, not guaranteed disk savings.\nAPFS clones and compression can affect actual space.")
                     .font(compact ? .caption2 : .caption).foregroundStyle(.secondary)
             }

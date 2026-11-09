@@ -17,6 +17,8 @@ final class AppModel: ObservableObject {
     }
     @Published private(set) var chosen: [Candidate] = []
     @Published private(set) var selectedBytes: Int64 = 0
+    @Published private(set) var selectedCategoryCounts: [CleanupCategory: Int] = [:]
+    @Published private(set) var selectedCategoryBytes: [CleanupCategory: Int64] = [:]
     @Published var isScanning = false
     @Published var isCleaning = false
     var busy: Bool { isScanning || isCleaning }
@@ -56,13 +58,20 @@ final class AppModel: ObservableObject {
     init(loadHistory: Bool = true) { loadsHistory = loadHistory; refreshHistory() }
     var files: [Candidate] { result?.files ?? [] }
     private func refreshChosen() {
-        guard !selection.isEmpty else { chosen = []; selectedBytes = 0; return }
+        guard !selection.isEmpty else {
+            chosen = []; selectedBytes = 0; selectedCategoryCounts = [:]; selectedCategoryBytes = [:]
+            return
+        }
         var selected: [Candidate] = []
         var bytes: Int64 = 0
+        var counts: [CleanupCategory: Int] = [:], sizes: [CleanupCategory: Int64] = [:]
         for item in files where !item.keeper && selection.contains(item.id) {
             selected.append(item); bytes += item.bytes
+            counts[item.category, default: 0] += 1
+            sizes[item.category, default: 0] += item.bytes
         }
         chosen = selected; selectedBytes = bytes
+        selectedCategoryCounts = counts; selectedCategoryBytes = sizes
     }
     private func refreshVisibleSelection() {
         var selectable = 0, selected = 0
@@ -91,6 +100,8 @@ final class AppModel: ObservableObject {
     }
     var candidateBytes: Int64 { result?.candidateBytes ?? 0 }
     var summaryBytes: Int64 { activeCategory.map { bytes($0) } ?? candidateBytes }
+    var summarySelectedCount: Int { activeCategory.map { selectedCategoryCounts[$0] ?? 0 } ?? chosen.count }
+    var summarySelectedBytes: Int64 { activeCategory.map { selectedCategoryBytes[$0] ?? 0 } ?? selectedBytes }
     var summaryCategories: [CleanupCategory] {
         CleanupCategory.allCases.filter { $0 != .videos && (activeCategory == nil || $0 == activeCategory) && bytes($0) > 0 }
     }
