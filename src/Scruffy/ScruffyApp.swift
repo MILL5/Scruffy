@@ -6,9 +6,13 @@ import CleanupCore
 
 @main
 struct ScruffyApp: App {
-    @StateObject private var model = AppModel()
+    @StateObject private var model: AppModel
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
     @State private var showAbout = false
+    init() {
+        SingleInstanceLock.enforce()
+        _model = StateObject(wrappedValue: AppModel())
+    }
     private var launchSize: CGSize {
         let screen = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1280, height: 900)
         return CGSize(width: min(1180, max(480, screen.width - 32)),
@@ -153,6 +157,7 @@ struct ContentView: View {
                     footer
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(theme.canvas)
           }
           .onAppear { windowSize = geometry.size }
@@ -305,7 +310,7 @@ struct ContentView: View {
             spaceChart
             VStack(alignment: .leading, spacing: 5) {
                 Text("SPACE TO REVIEW").font(.system(size: 10, weight: .medium)).tracking(1.5).foregroundStyle(.secondary)
-                Text(formatBytes(model.candidateBytes)).font(.system(size: compact ? 27 : 38, weight: .semibold, design: .rounded))
+                Text(formatBytes(model.summaryBytes)).font(.system(size: compact ? 27 : 38, weight: .semibold, design: .rounded))
                     .lineLimit(1).minimumScaleFactor(0.8)
                 Text(compact ? "Logical sizes; actual disk savings can differ." : "Logical file sizes, not guaranteed disk savings.\nAPFS clones and compression can affect actual space.")
                     .font(compact ? .caption2 : .caption).foregroundStyle(.secondary)
@@ -313,7 +318,7 @@ struct ContentView: View {
             Spacer(minLength: 0)
             if compact {
                 Menu {
-                    ForEach(CleanupCategory.allCases.filter { $0 != .videos && model.bytes($0) > 0 }) { category in
+                    ForEach(model.summaryCategories) { category in
                         Button("\(category.rawValue) · \(formatBytes(model.bytes(category)))") { model.activeCategory = category }
                     }
                 } label: { Image(systemName: "chart.pie").font(.title3).accessibilityLabel("Category sizes") }
@@ -324,7 +329,7 @@ struct ContentView: View {
     private var spaceChart: some View {
         Chart {
             ForEach(Array(CleanupCategory.allCases.filter { $0 != .videos }.enumerated()), id: \.element.id) { index, category in
-                if model.bytes(category) > 0 {
+                if model.summaryCategories.contains(category) {
                     SectorMark(angle: .value("Bytes", model.bytes(category)), innerRadius: .ratio(0.77), angularInset: 3)
                         .cornerRadius(3).foregroundStyle(palette[index])
                 }
@@ -336,7 +341,7 @@ struct ContentView: View {
     private var overviewLegend: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(CleanupCategory.allCases.filter { $0 != .videos }.enumerated()), id: \.element.id) { index, category in
-                if model.bytes(category) > 0 {
+                if model.summaryCategories.contains(category) {
                     Button { model.activeCategory = category } label: {
                         HStack {
                             Circle().fill(palette[index]).frame(width: 6, height: 6)
@@ -356,7 +361,7 @@ struct ContentView: View {
                     selectionControls
                     Spacer(minLength: 4)
                     if compact {
-                        Button("Clear selection") { model.selection = [] }.disabled(model.selection.isEmpty)
+                        Button("Clear selection") { model.selection = [] }.disabled(model.selection.isEmpty || model.isCleaning)
                     } else { searchControls }
                 }
                 if compact { searchControls }
@@ -366,6 +371,7 @@ struct ContentView: View {
                 ContentUnavailableView(model.isFiltering ? "Searching…" : (model.isScanning ? "Looking for more files" : "Nothing to review here"),
                                        systemImage: model.isFiltering ? "magnifyingglass" : "checkmark.seal",
                                        description: Text(model.isFiltering ? "Matching names and paths in this section." : (model.isScanning ? "More verified results will appear as scanning continues." : "Try another category or adjust your scan settings.")))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(pageFiles) { item in
                     HStack(spacing: compact ? 8 : 12) {
@@ -434,7 +440,7 @@ struct ContentView: View {
             TextField("Search \(model.activeCategory?.rawValue.lowercased() ?? "all files")", text: $model.query)
                 .textFieldStyle(.plain).frame(minWidth: 130, maxWidth: compact ? .infinity : 220)
                 .help("Search names and paths. Each word is matched independently; all words must match, in any order.")
-            if !compact { Button("Clear selection") { model.selection = [] }.disabled(model.selection.isEmpty) }
+            if !compact { Button("Clear selection") { model.selection = [] }.disabled(model.selection.isEmpty || model.isCleaning) }
         }.padding(.vertical, compact ? 6 : 0)
     }
     private var footer: some View {
@@ -444,6 +450,9 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(model.selection.isEmpty ? "Nothing selected" : "\(model.selection.count.formatted()) files · \(formatBytes(model.selectedBytes)) selected")
                         .font(.subheadline.bold()).lineLimit(1).minimumScaleFactor(0.85)
+                    if model.hasSelectionOutsideCategory {
+                        Text("Includes files selected in other categories.").font(.caption).foregroundStyle(.secondary)
+                    }
                     Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(compact ? 2 : 3)
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 Button { model.refreshRunningBrowsers(); showConfirmation = true } label: { Label("Review cleanup", systemImage: "trash") }

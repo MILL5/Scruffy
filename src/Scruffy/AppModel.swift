@@ -90,6 +90,14 @@ final class AppModel: ObservableObject {
         setSelection(item, selected: !selection.contains(item.id))
     }
     var candidateBytes: Int64 { result?.candidateBytes ?? 0 }
+    var summaryBytes: Int64 { activeCategory.map { bytes($0) } ?? candidateBytes }
+    var summaryCategories: [CleanupCategory] {
+        CleanupCategory.allCases.filter { $0 != .videos && (activeCategory == nil || $0 == activeCategory) && bytes($0) > 0 }
+    }
+    var hasSelectionOutsideCategory: Bool {
+        guard let activeCategory else { return false }
+        return chosen.contains { $0.category != activeCategory }
+    }
     func count(_ category: CleanupCategory) -> Int {
         category == .videos ? (result?.videos.count ?? 0) : (result?.categoryCounts[category] ?? 0)
     }
@@ -278,4 +286,9 @@ final class AppModel: ObservableObject {
     }
 }
 
-func formatBytes(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
+func formatBytes(_ bytes: Int64) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .file
+    formatter.allowsNonnumericFormatting = false
+    return formatter.string(fromByteCount: bytes)
+}

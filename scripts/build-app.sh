@@ -31,6 +31,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleShortVersionString</key><string>0.3.2</string>
 <key>CFBundleVersion</key><string>5</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>LSMultipleInstancesProhibited</key><true/>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSDownloadsFolderUsageDescription</key><string>Scruffy reviews your downloads for old and duplicate files. Nothing is removed without your selection and confirmation.</string>
 <key>NSDocumentsFolderUsageDescription</key><string>Scruffy scans folders you choose for duplicate and large files.</string>
