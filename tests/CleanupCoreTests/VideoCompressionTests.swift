@@ -217,8 +217,9 @@ final class VideoCompressionTests: XCTestCase, @unchecked Sendable {
                                                export: { _, output, _ in try Data(repeating: 9, count: 100).write(to: output) },
                                                moveToTrash: { source in
                                                    let moved = try fixture.move(source)
-                                                   try FileManager.default.removeItem(at: fixture.journal)
-                                                   try FileManager.default.createDirectory(at: fixture.journal, withIntermediateDirectories: false)
+                                                   let events = fixture.journal.deletingPathExtension().appendingPathExtension("events.jsonl")
+                                                   try FileManager.default.removeItem(at: events)
+                                                   try FileManager.default.createDirectory(at: events, withIntermediateDirectories: false)
                                                    return moved
                                                })
         do { _ = try await service.compress(fixture.candidate(), folders: [fixture.folder]); XCTFail("Expected recovery-history failure") }

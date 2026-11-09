@@ -495,6 +495,9 @@ struct ContentView: View {
                             Text("Quit these browsers before cleanup: \(model.runningBrowserNames.joined(separator: ", ")).").fontWeight(.medium)
                             Button("Quit browsers") { model.requestBrowserQuit() }
                             Text("You can also quit them yourself. Cleanup stays paused until they close.").foregroundStyle(.secondary)
+                        } else {
+                            Label("No browsers are running. Ready for cleanup.", systemImage: "checkmark.circle")
+                                .foregroundStyle(theme.accent)
                         }
                         if let message = model.browserQuitMessage { Text(message).foregroundStyle(.secondary) }
                     }.font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(6)
@@ -542,7 +545,9 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("A way back.").font(.title2.bold())
             Text("Restore files that Scruffy moved to Trash. Existing files are never replaced. If you emptied Trash, those files cannot be recovered here.").font(.subheadline).foregroundStyle(.secondary)
-            if model.history.isEmpty {
+            if model.isLoadingHistory && model.history.isEmpty {
+                ProgressView("Loading recovery history…").frame(maxWidth: .infinity).frame(height: 180)
+            } else if model.history.isEmpty {
                 ContentUnavailableView("No cleanup history yet", systemImage: "arrow.uturn.backward").frame(height: 180)
             } else {
                 List(model.history) { record in
