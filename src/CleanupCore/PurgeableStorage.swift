@@ -11,13 +11,6 @@ public struct StorageCapacity: Sendable {
     }
 }
 
-public enum ReclaimTarget: Int64, CaseIterable, Sendable, Identifiable {
-    case one = 1, five = 5, ten = 10, twenty = 20
-    public var id: Int64 { rawValue }
-    public var bytes: Int64 { rawValue * 1_000_000_000 }
-    public var title: String { "\(rawValue) GB" }
-}
-
 public struct StorageReport: Sendable {
     public let capacity: StorageCapacity
     public let snapshots: [String]
@@ -44,7 +37,13 @@ public enum PurgeableError: LocalizedError {
 public struct PurgeableStorage: Sendable {
     public typealias Runner = @Sendable (String, [String]) throws -> SystemCommandResult
     private let runner: Runner
-    public init(runner: @escaping Runner = PurgeableStorage.run) { self.runner = runner }
+    private let capacityReader: @Sendable () throws -> StorageCapacity
+    public init(runner: @escaping Runner = PurgeableStorage.run) {
+        self.runner = runner; capacityReader = { try PurgeableStorage.capacity() }
+    }
+    init(capacity: @escaping @Sendable () throws -> StorageCapacity, runner: @escaping Runner) {
+        self.runner = runner; capacityReader = capacity
+    }
 
     public static func run(_ executable: String, _ arguments: [String]) throws -> SystemCommandResult {
         let process = Process()
@@ -68,23 +67,26 @@ public struct PurgeableStorage: Sendable {
         return StorageCapacity(free: Int64(free), available: values.volumeAvailableCapacityForImportantUsage, total: Int64(total))
     }
     public func report() throws -> StorageReport {
-        let capacity = try Self.capacity()
+        let capacity = try capacityReader()
         let listing = try runner("/usr/bin/tmutil", ["listlocalsnapshots", "/"])
         guard listing.status == 0 else { throw PurgeableError.command(listing.output) }
         let protectedCount = listing.output.split(whereSeparator: \.isNewline).filter { $0.hasPrefix("com.apple.os.update-") }.count
         return StorageReport(capacity: capacity, snapshots: Self.snapshotNames(in: listing.output), protectedSnapshotCount: protectedCount)
     }
-    public static func reclaimScript(target: ReclaimTarget) -> String {
-        // Only enum-derived integers and fixed paths enter the shell. No filename, UI
+    public static func reclaimScript(requesting bytes: Int64) throws -> String {
+        guard bytes > 0 else { throw PurgeableError.unsupportedCapacity }
+        // Only a trusted capacity-derived integer and fixed paths enter the shell. No filename, UI
         // string, snapshot name, or process output is interpolated into this command.
-        "do shell script \"/usr/bin/tmutil thinlocalsnapshots / \(target.bytes) 1\" with administrator privileges"
+        return "do shell script \"/usr/bin/tmutil thinlocalsnapshots / \(bytes) 1\" with administrator privileges"
     }
-    public func reclaim(target: ReclaimTarget) throws {
+    public func reclaim() throws {
         // Refresh eligibility immediately before requesting admin approval.
         let listing = try runner("/usr/bin/tmutil", ["listlocalsnapshots", "/"])
         guard listing.status == 0 else { throw PurgeableError.command(listing.output) }
         guard !Self.snapshotNames(in: listing.output).isEmpty else { throw PurgeableError.noSnapshots }
-        let result = try runner("/usr/bin/osascript", ["-e", Self.reclaimScript(target: target)])
+        // The full volume size asks for all eligible snapshot space, without an app-imposed GB cap.
+        let bytes = try capacityReader().total
+        let result = try runner("/usr/bin/osascript", ["-e", Self.reclaimScript(requesting: bytes)])
         guard result.status == 0 else {
             throw PurgeableError.command(result.output.contains("-128") ? "Reclaim cancelled. No completion was reported." : result.output)
         }

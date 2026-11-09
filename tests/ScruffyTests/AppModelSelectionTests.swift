@@ -110,7 +110,7 @@ final class AppModelSelectionTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testBulkSelectionDoesNotChangeDuringCleanup() async {
+    func testBulkSelectionRemainsAvailableDuringOtherCleanup() async {
         let model = AppModel()
         let first = candidate("first", category: .downloads)
         let second = candidate("second", category: .downloads)
@@ -119,11 +119,11 @@ final class AppModelSelectionTests: XCTestCase, @unchecked Sendable {
         model.isCleaning = true
 
         model.setVisibleSelection(true)
-        XCTAssertEqual(model.selection, [first.id])
+        XCTAssertEqual(model.selection, [first.id, second.id])
         model.setVisibleSelection(false)
-        XCTAssertEqual(model.selection, [first.id])
-        XCTAssertEqual(model.chosen.map(\.id), [first.id])
-        XCTAssertEqual(model.selectedBytes, first.bytes)
+        XCTAssertTrue(model.selection.isEmpty)
+        XCTAssertTrue(model.chosen.isEmpty)
+        XCTAssertEqual(model.selectedBytes, 0)
     }
 
     @MainActor
@@ -169,18 +169,12 @@ final class AppModelSelectionTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testRowToggleDoesNotChangeSelectionDuringCleanupOrFiltering() async {
+    func testRowToggleWaitsForFiltering() async {
         let model = AppModel()
         let browser = candidate("browser", category: .browsers)
         let download = candidate("download", category: .downloads)
         model.result = ScanResult(files: [browser, download], notes: [])
         model.toggleSelection(download)
-        model.isCleaning = true
-        model.toggleSelection(download)
-        model.toggleSelection(browser)
-        XCTAssertEqual(model.selection, [download.id])
-
-        model.isCleaning = false
         model.activeCategory = .browsers
         XCTAssertTrue(model.isFiltering)
         model.toggleSelection(download)

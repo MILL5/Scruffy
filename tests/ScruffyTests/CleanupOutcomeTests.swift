@@ -30,7 +30,7 @@ final class CleanupOutcomeTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testMixedOutcomeRemovesMovedAndStaleFilesAndPreservesOtherSelections() {
+    func testMixedOutcomeRemovesMovedAndStaleFilesAndPreservesOtherSelections() async {
         let moved = candidate("moved-cache", bytes: 100)
         let stale = candidate("changed-download", category: .downloads, bytes: 70)
         let pending = candidate("pending-cache", bytes: 50)
@@ -41,7 +41,7 @@ final class CleanupOutcomeTests: XCTestCase, @unchecked Sendable {
                           selected: [moved.id, stale.id, pending.id, download.id])
         model.isScanning = true
 
-        model.applyCleanupOutcome(outcome(moved: [moved], skipped: [stale]))
+        await model.applyCleanupOutcome(outcome(moved: [moved], skipped: [stale]))
 
         let remaining: Set<String> = [pending.id, download.id, unselected.id, keeper.id]
         XCTAssertEqual(Set(model.files.map(\.id)), remaining)
@@ -58,13 +58,13 @@ final class CleanupOutcomeTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testSkipOnlyOutcomeReportsOneSummaryWithoutAnErrorAlert() {
+    func testSkipOnlyOutcomeReportsOneSummaryWithoutAnErrorAlert() async {
         let changed = candidate("changed-download", category: .downloads, bytes: 70)
         let missing = candidate("missing-cache", bytes: 40)
         let remaining = candidate("unchanged-cache", bytes: 20)
         let model = makeModel(files: [changed, missing, remaining], selected: [changed.id, missing.id, remaining.id])
 
-        model.applyCleanupOutcome(outcome(skipped: [changed, missing]))
+        await model.applyCleanupOutcome(outcome(skipped: [changed, missing]))
 
         XCTAssertEqual(model.files.map(\.id), [remaining.id])
         XCTAssertEqual(model.selection, [remaining.id])
@@ -80,7 +80,7 @@ final class CleanupOutcomeTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testRealErrorsRemainVisibleAlongsideSuccessfulMovesAndSoftSkips() {
+    func testRealErrorsRemainVisibleAlongsideSuccessfulMovesAndSoftSkips() async {
         let moved = candidate("moved-cache", bytes: 100)
         let stale = candidate("changed-cache", bytes: 70)
         let failed = candidate("permission-denied-cache", bytes: 200)
@@ -88,7 +88,7 @@ final class CleanupOutcomeTests: XCTestCase, @unchecked Sendable {
         let model = makeModel(files: [moved, stale, failed, untouched], selected: [moved.id, stale.id, failed.id])
         let failures = ["Permission denied for the next file.", "Recovery history could not be updated."]
 
-        model.applyCleanupOutcome(outcome(moved: [moved], skipped: [stale], errors: failures))
+        await model.applyCleanupOutcome(outcome(moved: [moved], skipped: [stale], errors: failures))
 
         XCTAssertEqual(Set(model.files.map(\.id)), [failed.id, untouched.id])
         XCTAssertEqual(model.selection, [failed.id])
@@ -98,12 +98,12 @@ final class CleanupOutcomeTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testErrorOnlyOutcomeDoesNotRemoveOrDeselectUntouchedFiles() {
+    func testErrorOnlyOutcomeDoesNotRemoveOrDeselectUntouchedFiles() async {
         let first = candidate("first-cache", bytes: 200)
         let second = candidate("second-cache", bytes: 100)
         let model = makeModel(files: [first, second], selected: [first.id, second.id])
 
-        model.applyCleanupOutcome(outcome(errors: ["Cannot write the recovery journal."]))
+        await model.applyCleanupOutcome(outcome(errors: ["Cannot write the recovery journal."]))
 
         XCTAssertEqual(model.files.map(\.id), [first.id, second.id])
         XCTAssertEqual(model.selection, [first.id, second.id])
@@ -115,15 +115,15 @@ final class CleanupOutcomeTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testReapplyingOutcomeDoesNotRemoveOtherFilesOrChangeTheirTotals() {
+    func testReapplyingOutcomeDoesNotRemoveOtherFilesOrChangeTheirTotals() async {
         let moved = candidate("moved-cache", bytes: 100)
         let stale = candidate("changed-cache", bytes: 70)
         let pending = candidate("pending-cache", bytes: 50)
         let model = makeModel(files: [moved, stale, pending], selected: [moved.id, stale.id, pending.id])
         let completed = outcome(moved: [moved], skipped: [stale])
 
-        model.applyCleanupOutcome(completed)
-        model.applyCleanupOutcome(completed)
+        await model.applyCleanupOutcome(completed)
+        await model.applyCleanupOutcome(completed)
 
         XCTAssertEqual(model.files.map(\.id), [pending.id])
         XCTAssertEqual(model.selection, [pending.id])
@@ -135,7 +135,7 @@ final class CleanupOutcomeTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testLaterProgressCannotReintroduceMovedOrSkippedFiles() {
+    func testLaterProgressCannotReintroduceMovedOrSkippedFiles() async {
         let moved = candidate("moved-cache", bytes: 100)
         let stale = candidate("changed-download.mov", category: .downloads, bytes: 70)
         let pending = candidate("pending-cache", bytes: 50)
@@ -144,12 +144,12 @@ final class CleanupOutcomeTests: XCTestCase, @unchecked Sendable {
         let model = makeModel(files: [moved, stale, pending, unselected], selected: [moved.id, stale.id, pending.id])
         model.result = ScanResult(files: model.files, notes: [], videos: [staleVideo])
         model.isScanning = true
-        model.applyCleanupOutcome(outcome(moved: [moved], skipped: [stale]))
+        await model.applyCleanupOutcome(outcome(moved: [moved], skipped: [stale]))
         let discoveredLater = candidate("new-large-file", category: .large, bytes: 400)
 
         let later = ScanResult(files: [moved, stale, pending, unselected, discoveredLater].sorted(by: Candidate.largestFirst),
                                notes: [], videos: [staleVideo])
-        model.publish(later)
+        await model.publish(later)
 
         let remaining: Set<String> = [pending.id, unselected.id, discoveredLater.id]
         XCTAssertEqual(Set(model.files.map(\.id)), remaining)

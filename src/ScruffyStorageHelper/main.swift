@@ -19,7 +19,7 @@ final class ReplyBox: @unchecked Sendable {
 
 do {
     let args = Array(CommandLine.arguments.dropFirst())
-    guard args == ["probe"] || (args.count == 2 && args[0] == "purge" && Int64(args[1]).flatMap(ReclaimTarget.init(rawValue:)) != nil) else {
+    guard args == ["probe"] || args == ["purge"] else {
         throw PurgeableError.command("Unsupported storage-helper request.")
     }
     alarm(args[0] == "probe" ? 45 : 240)
@@ -35,13 +35,14 @@ do {
     let bytes = try SystemPurgePolicy.verifiedBytes(raw)
     var removed: Int64?
     if args[0] == "purge" {
-        guard bytes > 0, let target = Int64(args[1]).flatMap(ReclaimTarget.init(rawValue:)) else {
+        guard bytes > 0 else {
             throw PurgeableError.command("macOS currently reports no cleanable system data. Nothing was removed.")
         }
         let box = ReplyBox()
         let callback: ReplyBlock = { dictionary in box.set(dictionary as? [String: Any]) }
         let purge = unsafeBitCast(purgeSymbol, to: Purge.self)
-        _ = purge(SystemPurgePolicy.purgeInfo(target: target) as CFDictionary, callback)?.takeRetainedValue()
+        // The fresh, service-validated probe supplies the entire eligible amount.
+        _ = purge(try SystemPurgePolicy.purgeInfo(cleanableBytes: bytes) as CFDictionary, callback)?.takeRetainedValue()
         guard box.done.wait(timeout: .now() + 210) == .success, let result = box.get() else {
             throw PurgeableError.command("macOS did not report completion. Refresh storage before retrying; the request may still finish.")
         }

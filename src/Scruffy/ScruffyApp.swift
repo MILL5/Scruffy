@@ -127,6 +127,7 @@ struct ContentView: View {
     private var pageFiles: ArraySlice<Candidate> { model.visible.dropFirst(currentPage * pageSize).prefix(pageSize) }
     @StateObject private var purgeable = PurgeableModel()
     @StateObject private var videos = VideoModel()
+    @State private var cleanupJobsExpanded = true
     private let palette: [Color] = [brandBlue,
         Color(red: 125 / 255, green: 179 / 255, blue: 196 / 255),
         Color(red: 145 / 255, green: 183 / 255, blue: 196 / 255),
@@ -135,6 +136,7 @@ struct ContentView: View {
         Color(red: 72 / 255, green: 137 / 255, blue: 158 / 255)]
     var body: some View {
         GeometryReader { geometry in
+          VStack(spacing: 0) {
           HStack(spacing: 0) {
             sidebar
             VStack(alignment: .leading, spacing: 0) {
@@ -148,7 +150,9 @@ struct ContentView: View {
                 } else {
                     header.padding(inset)
                     if model.result != nil {
-                        overview.padding(.horizontal, inset).padding(.bottom, compact ? 12 : 22)
+                        if !(compact && cleanupJobsExpanded && !model.cleanupJobs.isEmpty) {
+                            overview.padding(.horizontal, inset).padding(.bottom, compact ? 12 : 22)
+                        }
                         results
                     } else {
                         ScrollView { welcome.frame(maxWidth: .infinity) }
@@ -159,12 +163,19 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(theme.canvas)
+          }.frame(maxHeight: .infinity)
+          if !model.cleanupJobs.isEmpty || model.cleanupHistoryError != nil {
+              CleanupJobsView(jobs: model.cleanupJobs, historyError: model.cleanupHistoryError, availableSize: geometry.size,
+                              isExpanded: $cleanupJobsExpanded)
+          }
           }
           .onAppear { windowSize = geometry.size }
           .onChange(of: geometry.size) { _, size in windowSize = size }
         }
         .foregroundStyle(theme.text)
         .tint(theme.accent)
+        .background(BusyCursorRegion(isBusy: model.busy || purgeable.busy || videos.busy || model.isLoadingHistory
+                                     || (showPurgeable && purgeable.refreshing)))
         .sheet(isPresented: $showSettings) { settings }
         .sheet(isPresented: $showHistory) { history }
         .sheet(isPresented: $showConfirmation) { confirmation }
@@ -381,7 +392,7 @@ struct ContentView: View {
                     selectionControls
                     Spacer(minLength: 4)
                     if compact {
-                        Button("Clear selection") { model.selection = [] }.disabled(model.selection.isEmpty || model.isCleaning)
+                        Button("Clear selection") { model.selection = [] }.disabled(model.selection.isEmpty)
                     } else { searchControls }
                 }
                 if compact { searchControls }
@@ -397,7 +408,7 @@ struct ContentView: View {
                     HStack(spacing: compact ? 8 : 12) {
                         Toggle("Select \(item.url.lastPathComponent)", isOn: Binding(get: { model.selection.contains(item.id) }, set: { selected in
                             model.setSelection(item, selected: selected)
-                        })).labelsHidden().toggleStyle(.checkbox).disabled(item.keeper || model.isCleaning || model.isFiltering)
+                        })).labelsHidden().toggleStyle(.checkbox).disabled(item.keeper || model.isQueued(item) || model.isFiltering)
                         Button { model.toggleSelection(item) } label: {
                             HStack(spacing: compact ? 8 : 12) {
                                 CandidateFileIcon(path: item.id)
@@ -418,7 +429,7 @@ struct ContentView: View {
                                 Text(formatBytes(item.bytes)).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(.secondary).fixedSize()
                             }
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 7).contentShape(Rectangle())
-                        }.buttonStyle(.plain).disabled(item.keeper || model.isCleaning || model.isFiltering)
+                        }.buttonStyle(.plain).disabled(item.keeper || model.isQueued(item) || model.isFiltering)
                         Button { preview = item.url } label: { Image(systemName: "eye") }.buttonStyle(.borderless).help("Quick Look")
                         Button { NSWorkspace.shared.activateFileViewerSelecting([item.url]) } label: { Image(systemName: "folder") }.buttonStyle(.borderless).help("Reveal in Finder")
                     }.listRowBackground(model.selection.contains(item.id) ? theme.accent.opacity(0.12) : theme.card).contextMenu {
@@ -445,7 +456,7 @@ struct ContentView: View {
         HStack(spacing: 10) {
             Toggle("Select all", isOn: Binding(get: { model.allVisibleSelected }, set: { model.setVisibleSelection($0) }))
                 .toggleStyle(.checkbox).fixedSize()
-                .disabled(model.isCleaning || model.isFiltering || model.visibleSelectableCount == 0)
+                .disabled(model.isFiltering || model.visibleSelectableCount == 0)
                 .help("Select all matching files across every page. Protected originals remain unselected.")
             Text("\(model.visible.count.formatted()) files").font(.subheadline.bold()).lineLimit(1)
             if model.isFiltering || model.isScanning {
@@ -460,7 +471,7 @@ struct ContentView: View {
             TextField("Search \(model.activeCategory?.rawValue.lowercased() ?? "all files")", text: $model.query)
                 .textFieldStyle(.plain).frame(minWidth: 130, maxWidth: compact ? .infinity : 220)
                 .help("Search names and paths. Each word is matched independently; all words must match, in any order.")
-            if !compact { Button("Clear selection") { model.selection = [] }.disabled(model.selection.isEmpty || model.isCleaning) }
+            if !compact { Button("Clear selection") { model.selection = [] }.disabled(model.selection.isEmpty) }
         }.padding(.vertical, compact ? 6 : 0)
     }
     private var footer: some View {
@@ -473,11 +484,12 @@ struct ContentView: View {
                     if model.hasSelectionOutsideCategory {
                         Text("Includes files selected in other categories.").font(.caption).foregroundStyle(.secondary)
                     }
-                    Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(compact ? 2 : 3)
+                    Text(model.isCleaning ? "Background cleanup is running. Each job reports its progress below." : model.status)
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(compact ? 2 : 3)
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 Button { model.refreshRunningBrowsers(); showConfirmation = true } label: { Label("Review cleanup", systemImage: "trash") }
                     .buttonStyle(BrandButtonStyle()).controlSize(.large).fixedSize()
-                    .disabled(model.selection.isEmpty || model.isCleaning)
+                    .disabled(model.chosen.isEmpty || purgeable.busy || videos.busy)
             }.padding(.horizontal, inset).padding(.vertical, compact ? 12 : 20)
         }
     }
@@ -515,6 +527,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 18) {
             Label("One last look.", systemImage: "trash").font(.title2.bold())
             Text("Move \(model.chosen.count) files (\(formatBytes(model.selectedBytes))) to Trash?")
+            Text("Each selected category starts a separate background job. Follow file counts below while reviewing other categories.").font(.subheadline).foregroundStyle(.secondary)
             Text("Nothing will be permanently deleted. Files in Downloads and large-file results may contain personal data. Confirm that you no longer need each selected item.").font(.subheadline).foregroundStyle(.secondary)
             if model.chosen.contains(where: { $0.category == .browsers }) {
                 GroupBox("Browser caches") {

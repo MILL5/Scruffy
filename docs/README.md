@@ -10,6 +10,7 @@
 - [Verification record](verification/README.md): completed checks and remaining acceptance coverage.
 - [November 9 validation](verification/2026-11-09.md): indexed search, responsive UI, compression and website checks.
 - [November 9 review](reviews/2026-11-09.md): historical findings against the reviewed source snapshot.
+- [4:49 PM recording review](reviews/2026-11-09-recording-164925.md): timestamped navigation, safety and layout findings.
 - [Marketing website](site/index.html): the files deployed to GitHub Pages.
 
 Application source lives in `src/`, automated tests in `tests/`, and local packaging scripts in `scripts/`.

@@ -4,6 +4,7 @@ import CleanupCore
 
 @MainActor
 final class AppModel: ObservableObject {
+    typealias CleanupRunner = @Sendable ([Candidate], [Candidate], [URL], @escaping @Sendable (CleanupProgress) -> Void) async throws -> CleanupOutcome
     @Published var options = ScanOptions(folders: [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")])
     @Published var result: ScanResult? { didSet { updateSearchIndex(); refreshVisible(); refreshChosen() } }
     @Published private(set) var visible: [Candidate] = [] { didSet { refreshVisibleSelection() } }
@@ -21,6 +22,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var selectedCategoryBytes: [CleanupCategory: Int64] = [:]
     @Published var isScanning = false
     @Published var isCleaning = false
+    @Published private(set) var cleanupJobs: [CleanupJob] = []
+    @Published private(set) var activeCleanupPaths = Set<String>()
+    @Published private(set) var activeCleanupCategories = Set<CleanupCategory>()
+    @Published private(set) var cleanupHistoryError: String?
     var busy: Bool { isScanning || isCleaning }
     @Published var status = "Your files. Your call."
     @Published var error: String?
@@ -48,14 +53,36 @@ final class AppModel: ObservableObject {
     private var searchGeneration = UUID()
     private var sectionQueries: [String: String] = [:]
     private var publishedSnapshotID: UUID?
+    private var publicationGeneration = UUID()
+    private(set) var latestScanSnapshot: ScanResult?
     private var scanGeneration = UUID()
     private var removedPaths = Set<String>()
     private let loadsHistory: Bool
     private var historyTask: Task<Void, Never>?
     private var historyGeneration = UUID()
+    private let cleanupRunner: CleanupRunner
+    private let jobStore: CleanupJobStore?
+    private var cleanupTasks: [UUID: Task<Void, Never>] = [:]
+    private var jobsLoaded = false
+    private var pendingJobSave = false
+    private var jobHistoryWritable = true
+    private var jobRevision = 0
     let scanner = CleanupScanner()
-    let trash = TrashService()
-    init(loadHistory: Bool = true) { loadsHistory = loadHistory; refreshHistory() }
+    let trash: TrashService
+    init(loadHistory: Bool = true, cleanupRunner: CleanupRunner? = nil, jobHistoryURL: URL? = nil) {
+        let service = TrashService()
+        trash = service; loadsHistory = loadHistory
+        self.cleanupRunner = cleanupRunner ?? { selected, all, folders, progress in
+            try await service.clean(selected, all: all, folders: folders,
+                                    browsersRunning: { await AppModel.browsersRunning() }, progress: progress)
+        }
+        let url = jobHistoryURL ?? (loadHistory ? service.scanner.home.appendingPathComponent("Library/Application Support/Scruffy/cleanup-jobs.json") : nil)
+        jobStore = url.map(CleanupJobStore.init)
+        refreshHistory(); loadCleanupJobs()
+    }
+    func isQueued(_ item: Candidate) -> Bool {
+        activeCleanupPaths.contains(item.id) || activeCleanupCategories.contains(item.category)
+    }
     var files: [Candidate] { result?.files ?? [] }
     private func refreshChosen() {
         guard !selection.isEmpty else {
@@ -65,7 +92,7 @@ final class AppModel: ObservableObject {
         var selected: [Candidate] = []
         var bytes: Int64 = 0
         var counts: [CleanupCategory: Int] = [:], sizes: [CleanupCategory: Int64] = [:]
-        for item in files where !item.keeper && selection.contains(item.id) {
+        for item in files where !item.keeper && selection.contains(item.id) && !isQueued(item) {
             selected.append(item); bytes += item.bytes
             counts[item.category, default: 0] += 1
             sizes[item.category, default: 0] += item.bytes
@@ -75,7 +102,7 @@ final class AppModel: ObservableObject {
     }
     private func refreshVisibleSelection() {
         var selectable = 0, selected = 0
-        for item in visible where !item.keeper {
+        for item in visible where !item.keeper && !isQueued(item) {
             selectable += 1
             if selection.contains(item.id) { selected += 1 }
         }
@@ -83,14 +110,14 @@ final class AppModel: ObservableObject {
         allVisibleSelected = selectable > 0 && selected == selectable
     }
     func setVisibleSelection(_ selected: Bool) {
-        guard !isCleaning, !isFiltering else { return }
-        let ids = Set(visible.lazy.filter { !$0.keeper }.map(\.id))
+        guard !isFiltering else { return }
+        let ids = Set(visible.lazy.filter { !$0.keeper && !self.isQueued($0) }.map(\.id))
         if selected { selection.formUnion(ids) }
         else { selection.subtract(ids) }
     }
     func setSelection(_ item: Candidate, selected: Bool) {
-        guard !isCleaning, !isFiltering,
-              let current = result?.filesByID[item.id], !current.keeper,
+        guard !isFiltering,
+              let current = result?.filesByID[item.id], !current.keeper, !isQueued(current),
               current.fingerprint == item.fingerprint else { return }
         if selected { selection.insert(item.id) }
         else { selection.remove(item.id) }
@@ -173,7 +200,7 @@ final class AppModel: ObservableObject {
         guard !busy else { return }
         let snapshot = options
         let generation = UUID()
-        scanGeneration = generation; removedPaths = []; publishedSnapshotID = nil
+        scanGeneration = generation; removedPaths = []; publishedSnapshotID = nil; latestScanSnapshot = nil
         isScanning = true; selection = []; result = nil; status = "Scanning local files…"; error = nil
         task = Task {
             let (updates, continuation) = AsyncStream.makeStream(of: (ScanResult, String).self, bufferingPolicy: .bufferingNewest(1))
@@ -187,24 +214,48 @@ final class AppModel: ObservableObject {
                 let found = try await withTaskCancellationHandler(operation: {
                     for await (partial, progress) in updates {
                         guard scanGeneration == generation, !Task.isCancelled else { break }
-                        publish(partial)
+                        await publish(partial)
                         if !isCleaning { status = progress }
                     }
                     return try await work.value
                 }, onCancel: { work.cancel(); continuation.finish() })
                 guard scanGeneration == generation else { return }
-                publish(found, final: true); hasScanned = true
+                await publish(found, final: true); hasScanned = true
                 if !isCleaning { status = "\(result?.categoryCounts.values.reduce(0, +) ?? 0) files ready to review · \(result?.videos.count ?? 0) videos available." }
             } catch is CancellationError { if !isCleaning { status = "Scan stopped. Ready results are still available." } }
             catch { self.error = error.localizedDescription; status = "Scan could not finish." }
             if scanGeneration == generation { isScanning = false }
         }
     }
-    func publish(_ found: ScanResult, final: Bool = false) {
+    func publish(_ found: ScanResult, final: Bool = false, recordsSource: Bool = true) async {
         guard final || publishedSnapshotID != found.id else { return }
+        if recordsSource { latestScanSnapshot = found }
+        let publication = UUID(), scan = scanGeneration
+        publicationGeneration = publication
+        let ready: ScanResult
+        if removedPaths.isEmpty { ready = found }
+        else {
+            let removed = removedPaths
+            let work = Task.detached(priority: .userInitiated) {
+                var files: [Candidate] = []
+                files.reserveCapacity(found.files.count)
+                for start in stride(from: 0, to: found.files.count, by: 512) {
+                    try Task.checkCancellation()
+                    autoreleasepool {
+                        for item in found.files[start..<min(start + 512, found.files.count)] where !removed.contains(item.id) {
+                            files.append(item)
+                        }
+                    }
+                }
+                try Task.checkCancellation()
+                return ScanResult(files: files, notes: found.notes, videos: found.videos.filter { !removed.contains($0.id) })
+            }
+            do {
+                ready = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
+            } catch { return }
+        }
+        guard publicationGeneration == publication, scanGeneration == scan, !Task.isCancelled else { return }
         publishedSnapshotID = found.id
-        let ready = removedPaths.isEmpty ? found : ScanResult(files: found.files.filter { !removedPaths.contains($0.id) }, notes: found.notes,
-                                                           videos: found.videos.filter { !removedPaths.contains($0.id) })
         if !ready.files.isEmpty || !ready.videos.isEmpty || final { result = ready }
         if !selection.isEmpty {
             selection = selection.filter { ready.filesByID[$0]?.keeper == false }
@@ -226,7 +277,7 @@ final class AppModel: ObservableObject {
     }
     func invalidate() {
         task?.cancel(); scanGeneration = UUID(); isScanning = false
-        result = nil; selection = []; hasScanned = false; removedPaths = []; publishedSnapshotID = nil
+        result = nil; selection = []; hasScanned = false; removedPaths = []; publishedSnapshotID = nil; latestScanSnapshot = nil
         status = "Scan settings changed. Ready for a fresh look."
     }
     static func isSupportedBrowser(_ bundleIdentifier: String) -> Bool {
@@ -255,7 +306,6 @@ final class AppModel: ObservableObject {
         if names.isEmpty { browserQuitMessage = nil }
     }
     func requestBrowserQuit() {
-        guard !isCleaning else { return }
         let browsers = Self.runningBrowsers()
         let requests = browsers.filter { $0.activationPolicy == .regular }.map { $0.terminate() }
         browserQuitMessage = requests.contains(false) || requests.isEmpty
@@ -264,31 +314,92 @@ final class AppModel: ObservableObject {
         refreshRunningBrowsers()
     }
     func clean() {
-        let selected = chosen, all = files, folders = options.folders
-        guard !selected.isEmpty, !isCleaning else { return }
-        isCleaning = true; error = nil; status = "Checking ready files and moving approved items to Trash…"
-        Task {
-            let work = Task.detached(priority: .userInitiated) {
-                try await TrashService().clean(selected, all: all, folders: folders, browsersRunning: { await AppModel.browsersRunning() })
+        let selected = chosen.filter { !isQueued($0) }, all = files, folders = options.folders
+        guard !selected.isEmpty else { return }
+        let groups = Dictionary(grouping: selected, by: \.category)
+        error = nil
+        for category in CleanupCategory.allCases {
+            guard !activeCleanupCategories.contains(category), let queue = groups[category], !queue.isEmpty else { continue }
+            let job = CleanupJob(category: category, total: queue.count)
+            cleanupJobs.insert(job, at: 0)
+            activeCleanupPaths.formUnion(queue.map(\.id)); activeCleanupCategories.insert(category)
+            selection.subtract(queue.map(\.id))
+            startCleanupJob(job.id, queue: queue, all: all, folders: folders)
+        }
+        isCleaning = cleanupJobs.contains { $0.state.isRunning }
+        refreshChosen(); refreshVisibleSelection(); persistCleanupJobs()
+        status = "Background cleanup started. Follow each job below."
+    }
+    private func startCleanupJob(_ id: UUID, queue: [Candidate], all: [Candidate], folders: [URL]) {
+        let runner = cleanupRunner
+        let (updates, continuation) = AsyncStream.makeStream(of: CleanupProgress.self, bufferingPolicy: .bufferingNewest(1))
+        let work = Task.detached(priority: .userInitiated) {
+            defer { continuation.finish() }
+            return try await runner(queue, all, folders) { continuation.yield($0) }
+        }
+        cleanupTasks[id] = Task {
+            for await progress in updates {
+                if let index = cleanupJobs.firstIndex(where: { $0.id == id }) { cleanupJobs[index].update(progress) }
             }
             do {
                 let outcome = try await work.value
-                applyCleanupOutcome(outcome)
-            } catch { self.error = error.localizedDescription; status = "Cleanup stopped. Review the message before scanning again." }
-            isCleaning = false
+                if let index = cleanupJobs.firstIndex(where: { $0.id == id }) { cleanupJobs[index].state = .finishing }
+                await applyCleanupOutcome(outcome, showErrors: false)
+                if let index = cleanupJobs.firstIndex(where: { $0.id == id }) { cleanupJobs[index].finish(outcome) }
+                releaseCleanupQueue(id, queue: queue)
+            } catch {
+                if let index = cleanupJobs.firstIndex(where: { $0.id == id }) { cleanupJobs[index].finish(error: error.localizedDescription) }
+                releaseCleanupQueue(id, queue: queue)
+            }
+            if let job = cleanupJobs.first(where: { $0.id == id }) { status = "\(job.name): \(job.status)." }
+            cleanupTasks.removeValue(forKey: id)
+            persistCleanupJobs()
         }
     }
-    func applyCleanupOutcome(_ outcome: CleanupOutcome) {
+    private func releaseCleanupQueue(_ id: UUID, queue: [Candidate]) {
+        activeCleanupPaths.subtract(queue.map(\.id))
+        for category in Set(queue.map(\.category)) { activeCleanupCategories.remove(category) }
+        isCleaning = cleanupJobs.contains { $0.state.isRunning }
+        refreshChosen(); refreshVisibleSelection()
+    }
+    private func loadCleanupJobs() {
+        guard let jobStore else { jobsLoaded = true; return }
+        Task {
+            do {
+                let saved = try await jobStore.load()
+                let known = Set(cleanupJobs.map(\.id))
+                cleanupJobs.append(contentsOf: saved.filter { !known.contains($0.id) })
+            } catch {
+                cleanupHistoryError = "Cannot read background job history: \(error.localizedDescription)"
+                jobHistoryWritable = false
+            }
+            jobsLoaded = true
+            if pendingJobSave { persistCleanupJobs() }
+        }
+    }
+    private func persistCleanupJobs() {
+        guard let jobStore, jobHistoryWritable else { return }
+        guard jobsLoaded else { pendingJobSave = true; return }
+        pendingJobSave = false; jobRevision += 1
+        let jobs = cleanupJobs, revision = jobRevision
+        Task {
+            do { try await jobStore.save(jobs, revision: revision) }
+            catch { cleanupHistoryError = "Cannot save background job history: \(error.localizedDescription)" }
+        }
+    }
+    func applyCleanupOutcome(_ outcome: CleanupOutcome, showErrors: Bool = true) async {
         status = "\(outcome.count) files (\(formatBytes(outcome.bytes))) moved to Trash."
         if !outcome.skippedIDs.isEmpty {
             status += " \(outcome.skippedIDs.count) changed or missing files left untouched. Scan again to review them."
         }
         status += " Space is released only after you empty Trash."
-        error = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "\n")
+        if showErrors { error = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "\n") }
         let finished = Set(outcome.movedIDs + outcome.skippedIDs)
         removedPaths.formUnion(finished)
-        if let current = result { publish(current, final: true) }
         selection.subtract(finished)
+        if !finished.isEmpty, let current = latestScanSnapshot ?? result {
+            await publish(current, final: true, recordsSource: false)
+        }
         refreshHistory()
     }
     func restore(_ record: TrashRecord) {

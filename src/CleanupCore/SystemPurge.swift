@@ -35,9 +35,10 @@ public enum SystemPurgePolicy {
         ["CACHE_DELETE_VOLUME": volume, "CACHE_DELETE_URGENCY_LIMIT": urgency,
          "CACHE_DELETE_NO_CACHE": true, "CACHE_DELETE_SERVICES": services]
     }
-    public static func purgeInfo(target: ReclaimTarget) -> [String: Any] {
-        ["CACHE_DELETE_VOLUME": volume, "CACHE_DELETE_URGENCY": urgency,
-         "CACHE_DELETE_AMOUNT": target.bytes, "CACHE_DELETE_SERVICES": services,
+    public static func purgeInfo(cleanableBytes: Int64) throws -> [String: Any] {
+        guard cleanableBytes > 0 else { throw PurgeableError.command("macOS currently reports no cleanable system data. Nothing was removed.") }
+        return ["CACHE_DELETE_VOLUME": volume, "CACHE_DELETE_URGENCY": urgency,
+         "CACHE_DELETE_AMOUNT": cleanableBytes, "CACHE_DELETE_SERVICES": services,
          "CACHE_DELETE_QUERY_AFTER_PURGE": true]
     }
 }
@@ -49,7 +50,7 @@ public struct SystemPurgeClient: Sendable {
         self.helper = helper; self.runner = runner
     }
     public func probe() throws -> SystemPurgeReply { try call(["probe"]) }
-    public func clean(target: ReclaimTarget) throws -> SystemPurgeReply { try call(["purge", String(target.rawValue)]) }
+    public func clean() throws -> SystemPurgeReply { try call(["purge"]) }
     private func call(_ arguments: [String]) throws -> SystemPurgeReply {
         let result = try runner(helper.path, arguments)
         guard result.status == 0 else {

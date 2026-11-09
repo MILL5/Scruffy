@@ -118,8 +118,11 @@ struct TrashJournal: Sendable {
             guard let newline = data[start..<end].firstIndex(of: 0x0a) else { throw Failure.corrupt(eventsURL.path) }
             let event: Event
             do {
-                event = try decoder.decode(Event.self, from: Data(data[start..<newline]))
-                try event.validate()
+                event = try autoreleasepool {
+                    let decoded = try decoder.decode(Event.self, from: Data(data[start..<newline]))
+                    try decoded.validate()
+                    return decoded
+                }
             } catch { throw Failure.corrupt(eventsURL.path) }
             apply?(event)
             start = newline + 1
