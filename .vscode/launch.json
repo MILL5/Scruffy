@@ -1,0 +1,44 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:scruffy}",
+      "name": "Debug Scruffy",
+      "target": "Scruffy",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug Scruffy"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:scruffy}",
+      "name": "Release Scruffy",
+      "target": "Scruffy",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release Scruffy"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:scruffy}",
+      "name": "Debug ScruffyStorageHelper",
+      "target": "ScruffyStorageHelper",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug ScruffyStorageHelper"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:scruffy}",
+      "name": "Release ScruffyStorageHelper",
+      "target": "ScruffyStorageHelper",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release ScruffyStorageHelper"
+    }
+  ]
+}

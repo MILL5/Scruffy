@@ -1,0 +1,22 @@
+name: Validate Scruffy
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check documentation and website links
+        run: python3 scripts/check-links.py
+      - name: Test native app and filesystem safeguards
+        run: swift test
+      - name: Build release app
+        run: ./scripts/build-app.sh
