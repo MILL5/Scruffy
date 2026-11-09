@@ -26,7 +26,7 @@ public enum CleanupCategory: String, CaseIterable, Sendable, Identifiable {
         switch self {
         case .duplicates: "Identical contents, verified with SHA-256. One original is always protected. Review locations before choosing copies."
         case .downloads: "Files untouched for at least 30 days. Age does not mean unwanted: review each file before selecting it."
-        case .browsers: "Downloaded web resources such as JavaScript and images only. Saved passwords, cookies, bookmarks and browsing history stay untouched. Browsers must quit before cleanup."
+        case .browsers: "Downloaded web resources such as JavaScript and images only. Saved passwords, cookies, bookmarks and browsing history stay untouched. Any running browsers must close before cleanup."
         case .caches: "pip, uv and npm download caches. Recreated as needed; future installs may require a download. Quit package managers first."
         case .temporary: "Regular files untouched for at least seven days in your user temporary folder. Quit active apps and review before selecting."
         case .large: "Files over 500 MB in your chosen folders. These may be valuable personal files; nothing is selected automatically."

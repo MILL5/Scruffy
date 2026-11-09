@@ -3,6 +3,7 @@
 - [Product references](product/product-references.md): research and scope.
 - [Branding](design/branding.md) and [logo assets](design/logo-generation.md).
 - [Indexed search](architecture/ngram-search.md): native NGramSearch and measured performance.
+- [Cleanup and recovery](architecture/cleanup-and-recovery.md): skipped files, conditional browser checks and durable recovery events.
 - [System purge and scan responsiveness](architecture/system-purge-and-performance.md).
 - [Purgeable storage](architecture/purgeable-storage.md): snapshot reclamation and its limits.
 - [Video compression](architecture/video-compression.md): verification, replacement and recovery.
