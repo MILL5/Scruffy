@@ -259,8 +259,13 @@ struct ContentView: View {
             }
             }.padding(.horizontal, compact ? 8 : 12).padding(.vertical, bytes == nil ? 9 : 6)
                 .foregroundStyle(selected ? theme.accent : theme.text.opacity(0.85))
-                .background(selected ? brandBlue.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 9))
+                .background(selected ? brandBlue.opacity(0.26) : .clear, in: RoundedRectangle(cornerRadius: 9))
+                .overlay { RoundedRectangle(cornerRadius: 9).stroke(selected ? theme.accent : .clear, lineWidth: 1.5) }
+                .overlay(alignment: .leading) {
+                    Capsule().fill(selected ? theme.accent : .clear).frame(width: 3).padding(.vertical, 6)
+                }
         }.buttonStyle(.plain).disabled(purgeable.busy || videos.busy)
+            .accessibilityAddTraits(selected ? .isSelected : [])
     }
     private func selectedCategoryLabel(count: Int, bytes: Int64) -> some View {
         Label("\(count.formatted()) selected · \(formatBytes(bytes))", systemImage: count > 0 ? "checkmark.circle.fill" : "circle")
