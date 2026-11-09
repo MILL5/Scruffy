@@ -267,7 +267,7 @@ struct VideoView: View {
 
     private var selectionControls: some View {
         HStack(spacing: 10) {
-            Toggle("Select all", isOn: Binding(get: { model.allVisibleSelected }, set: model.setVisibleSelection))
+            Toggle("Select all", isOn: Binding(get: { model.allVisibleSelected }, set: { selected in model.setVisibleSelection(selected) }))
                 .toggleStyle(.checkbox).fixedSize().disabled(model.busy || model.isFiltering || model.visibleSelectableCount == 0)
                 .help("Select every matching video across all pages.")
             Text("\(model.visible.count.formatted()) videos").font(.subheadline.bold()).lineLimit(1)
