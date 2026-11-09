@@ -121,18 +121,24 @@ final class SafetyTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(FileManager.default.fileExists(atPath: cache.path))
     }
     func testWholeBatchValidatesBeforeAnyMove() async throws {
-        try file("Downloads/a.txt"); try file("Downloads/b.txt")
+        try file("Downloads/first-a.txt", "first group contents")
+        try file("Downloads/first-b.txt", "first group contents")
+        try file("Downloads/second-a.txt", "second group contents are longer")
+        try file("Downloads/second-b.txt", "second group contents are longer")
         let found = try scanner.scan(options())
-        let copy = try XCTUnwrap(found.files.first { !$0.keeper })
-        try Data("changed".utf8).write(to: copy.url)
+        let validCopy = try XCTUnwrap(found.files.first { !$0.keeper && $0.url.lastPathComponent.hasPrefix("first-") })
+        let unsafeCopy = try XCTUnwrap(found.files.first { !$0.keeper && $0.url.lastPathComponent.hasPrefix("second-") })
+        try FileManager.default.removeItem(at: unsafeCopy.url)
+        try FileManager.default.createSymbolicLink(at: unsafeCopy.url, withDestinationURL: validCopy.url)
         let service = TrashService(scanner: scanner, journal: root.appendingPathComponent("journal.json"))
         do {
-            _ = try await service.clean([copy], all: found.files, folders: [downloads], browsersRunning: { false }, moveToTrash: { _ in
+            _ = try await service.clean([validCopy, unsafeCopy], all: found.files, folders: [downloads], browsersRunning: { false }, moveToTrash: { _ in
                 XCTFail("No move should occur after validation fails"); throw SafetyError.keeper
             })
             XCTFail("Expected rejection")
         } catch { }
         XCTAssertTrue(try service.records().isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: validCopy.url.path))
     }
     func testTrashJournalRestoreAndNoOverwrite() async throws {
         try file("Downloads/a.txt"); try file("Downloads/b.txt")

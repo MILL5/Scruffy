@@ -23,6 +23,7 @@ final class AppModel: ObservableObject {
     @Published var status = "Your files. Your call."
     @Published var error: String?
     @Published var history: [TrashRecord] = []
+    @Published private(set) var isLoadingHistory = false
     @Published var activeCategory: CleanupCategory? {
         didSet {
             if activeCategory != oldValue { query = sectionQueries[activeCategory?.rawValue ?? "Overview"] ?? "" }
@@ -47,9 +48,12 @@ final class AppModel: ObservableObject {
     private var publishedSnapshotID: UUID?
     private var scanGeneration = UUID()
     private var removedPaths = Set<String>()
+    private let loadsHistory: Bool
+    private var historyTask: Task<Void, Never>?
+    private var historyGeneration = UUID()
     let scanner = CleanupScanner()
     let trash = TrashService()
-    init() { refreshHistory() }
+    init(loadHistory: Bool = true) { loadsHistory = loadHistory; refreshHistory() }
     var files: [Candidate] { result?.files ?? [] }
     private func refreshChosen() {
         guard !selection.isEmpty else { chosen = []; selectedBytes = 0; return }
@@ -128,8 +132,23 @@ final class AppModel: ObservableObject {
         }
     }
     func refreshHistory() {
-        do { history = try trash.records().reversed() }
-        catch { self.error = "Cannot read recovery history: \(error.localizedDescription)" }
+        guard loadsHistory else { return }
+        historyTask?.cancel()
+        let generation = UUID(), store = trash
+        historyGeneration = generation; isLoadingHistory = true
+        historyTask = Task {
+            let work = Task.detached(priority: .utility) { Array(try store.records().reversed()) }
+            do {
+                let records = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
+                guard historyGeneration == generation else { return }
+                history = records
+            } catch is CancellationError { }
+            catch {
+                guard historyGeneration == generation else { return }
+                self.error = "Cannot read recovery history: \(error.localizedDescription)"
+            }
+            if historyGeneration == generation { isLoadingHistory = false }
+        }
     }
     func scan() {
         guard !busy else { return }
@@ -162,7 +181,7 @@ final class AppModel: ObservableObject {
             if scanGeneration == generation { isScanning = false }
         }
     }
-    private func publish(_ found: ScanResult, final: Bool = false) {
+    func publish(_ found: ScanResult, final: Bool = false) {
         guard final || publishedSnapshotID != found.id else { return }
         publishedSnapshotID = found.id
         let ready = removedPaths.isEmpty ? found : ScanResult(files: found.files.filter { !removedPaths.contains($0.id) }, notes: found.notes,
@@ -199,8 +218,13 @@ final class AppModel: ObservableObject {
     static func runningBrowsers() -> [NSRunningApplication] {
         NSWorkspace.shared.runningApplications.filter {
             let id = $0.bundleIdentifier ?? ""
-            return !$0.isTerminated && isSupportedBrowser(id)
+            return isRunningBrowser(bundleIdentifier: id, isRegularApplication: $0.activationPolicy == .regular,
+                                    isTerminated: $0.isTerminated)
         }
+    }
+    static func isRunningBrowser(bundleIdentifier: String, isRegularApplication: Bool, isTerminated: Bool) -> Bool {
+        isRegularApplication && !isTerminated && !bundleIdentifier.lowercased().contains(".helper")
+            && isSupportedBrowser(bundleIdentifier)
     }
     static func browsersRunning() -> Bool { !runningBrowsers().isEmpty }
     var browserCleanupBlocked: Bool {
@@ -223,21 +247,30 @@ final class AppModel: ObservableObject {
     func clean() {
         let selected = chosen, all = files, folders = options.folders
         guard !selected.isEmpty, !isCleaning else { return }
-        isCleaning = true; status = "Checking ready files and moving approved items to Trash…"
+        isCleaning = true; error = nil; status = "Checking ready files and moving approved items to Trash…"
         Task {
             let work = Task.detached(priority: .userInitiated) {
                 try await TrashService().clean(selected, all: all, folders: folders, browsersRunning: { await AppModel.browsersRunning() })
             }
             do {
                 let outcome = try await work.value
-                status = "\(outcome.count) files (\(formatBytes(outcome.bytes))) moved to Trash. Space is released only after you empty Trash."
-                if !outcome.errors.isEmpty { error = outcome.errors.joined(separator: "\n") }
-                removedPaths.formUnion(outcome.movedIDs)
-                if let current = result { publish(current, final: true) }
-                selection.subtract(outcome.movedIDs); refreshHistory()
+                applyCleanupOutcome(outcome)
             } catch { self.error = error.localizedDescription; status = "Cleanup stopped. Review the message before scanning again." }
             isCleaning = false
         }
+    }
+    func applyCleanupOutcome(_ outcome: CleanupOutcome) {
+        status = "\(outcome.count) files (\(formatBytes(outcome.bytes))) moved to Trash."
+        if !outcome.skippedIDs.isEmpty {
+            status += " \(outcome.skippedIDs.count) changed or missing files left untouched. Scan again to review them."
+        }
+        status += " Space is released only after you empty Trash."
+        error = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "\n")
+        let finished = Set(outcome.movedIDs + outcome.skippedIDs)
+        removedPaths.formUnion(finished)
+        if let current = result { publish(current, final: true) }
+        selection.subtract(finished)
+        refreshHistory()
     }
     func restore(_ record: TrashRecord) {
         do { try trash.restore(record); refreshHistory(); invalidate(); status = "Restored \(record.original.lastPathComponent)." }
