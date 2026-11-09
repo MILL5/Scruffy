@@ -23,7 +23,7 @@ The Swift targets live in `src/`, automated tests in `tests/`, and packaging/lin
 - Optionally reviews pip, uv and npm download caches and user temporary files at least seven days old.
 - Provides a category space chart, largest-first file lists, row-click selection, per-section NGramSearch indexes, Quick Look and Reveal in Finder. Each search word matches independently; results must match every word in any order.
 - Finds MP4, MOV and M4V videos in chosen folders for reviewed high-quality HEVC compression. Resolution and file container stay the same; only verified smaller outputs replace originals, which move to Trash with a recovery record.
-- Moves only explicitly selected files to macOS Trash after a confirmation and fresh validation; changed or missing files are skipped while eligible files continue.
+- Moves only explicitly selected files to macOS Trash after a confirmation and fresh validation, using named background jobs per category with file counts and visible failures. Changed or missing files are skipped while eligible files continue; failed/interrupted jobs never resume automatically.
 - Keeps a local recovery journal under `~/Library/Application Support/Scruffy/`; restores without overwriting existing files.
 - Cleans system-marked discardable data and eligible app-container caches through macOS's purge service after explicit review; cloud documents and snapshots are excluded.
 - Separately offers Time Machine snapshot reclamation after explicit review and administrator approval. This action permanently removes some local restore points; it does not use Trash.

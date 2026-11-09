@@ -6,9 +6,13 @@ import CleanupCore
 
 @main
 struct ScruffyApp: App {
-    @StateObject private var model = AppModel()
+    @StateObject private var model: AppModel
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
     @State private var showAbout = false
+    init() {
+        SingleInstanceLock.enforce()
+        _model = StateObject(wrappedValue: AppModel())
+    }
     private var launchSize: CGSize {
         let screen = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1280, height: 900)
         return CGSize(width: min(1180, max(480, screen.width - 32)),
@@ -123,6 +127,7 @@ struct ContentView: View {
     private var pageFiles: ArraySlice<Candidate> { model.visible.dropFirst(currentPage * pageSize).prefix(pageSize) }
     @StateObject private var purgeable = PurgeableModel()
     @StateObject private var videos = VideoModel()
+    @State private var cleanupJobsExpanded = true
     private let palette: [Color] = [brandBlue,
         Color(red: 125 / 255, green: 179 / 255, blue: 196 / 255),
         Color(red: 145 / 255, green: 183 / 255, blue: 196 / 255),
@@ -131,6 +136,7 @@ struct ContentView: View {
         Color(red: 72 / 255, green: 137 / 255, blue: 158 / 255)]
     var body: some View {
         GeometryReader { geometry in
+          VStack(spacing: 0) {
           HStack(spacing: 0) {
             sidebar
             VStack(alignment: .leading, spacing: 0) {
@@ -144,7 +150,9 @@ struct ContentView: View {
                 } else {
                     header.padding(inset)
                     if model.result != nil {
-                        overview.padding(.horizontal, inset).padding(.bottom, compact ? 12 : 22)
+                        if !(compact && cleanupJobsExpanded && !model.cleanupJobs.isEmpty) {
+                            overview.padding(.horizontal, inset).padding(.bottom, compact ? 12 : 22)
+                        }
                         results
                     } else {
                         ScrollView { welcome.frame(maxWidth: .infinity) }
@@ -153,13 +161,21 @@ struct ContentView: View {
                     footer
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(theme.canvas)
+          }.frame(maxHeight: .infinity)
+          if !model.cleanupJobs.isEmpty || model.cleanupHistoryError != nil {
+              CleanupJobsView(jobs: model.cleanupJobs, historyError: model.cleanupHistoryError, availableSize: geometry.size,
+                              isExpanded: $cleanupJobsExpanded)
+          }
           }
           .onAppear { windowSize = geometry.size }
           .onChange(of: geometry.size) { _, size in windowSize = size }
         }
         .foregroundStyle(theme.text)
         .tint(theme.accent)
+        .background(BusyCursorRegion(isBusy: model.busy || purgeable.busy || videos.busy || model.isLoadingHistory
+                                     || (showPurgeable && purgeable.refreshing)))
         .sheet(isPresented: $showSettings) { settings }
         .sheet(isPresented: $showHistory) { history }
         .sheet(isPresented: $showConfirmation) { confirmation }
@@ -193,7 +209,9 @@ struct ContentView: View {
                 Text("REVIEW FILES").font(.system(size: 10, weight: .semibold)).tracking(1.8).foregroundStyle(.secondary).padding(.top, 22).padding(.bottom, 6)
                 ForEach(CleanupCategory.allCases) { category in
                     navRow(category.rawValue, icon: category.symbol, selected: !showPurgeable && (category == .videos ? showVideos : (!showVideos && model.activeCategory == category)),
-                           count: model.count(category), bytes: model.result == nil ? nil : model.bytes(category)) {
+                           count: model.count(category), bytes: model.result == nil ? nil : model.bytes(category),
+                           selectedCount: category == .videos ? videos.chosen.count : (model.selectedCategoryCounts[category] ?? 0),
+                           selectedBytes: category == .videos ? videos.selectedBytes : (model.selectedCategoryBytes[category] ?? 0)) {
                         showPurgeable = false; showVideos = category == .videos
                         if category != .videos { model.activeCategory = category }
                     }
@@ -220,8 +238,10 @@ struct ContentView: View {
         }.padding(compact ? 14 : 22).frame(width: sidebarWidth).background(theme.sidebar)
             .overlay(alignment: .trailing) { Rectangle().fill(theme.border).frame(width: 1) }
     }
-    private func navRow(_ title: String, icon: String, selected: Bool, count: Int = 0, bytes: Int64? = nil, action: @escaping () -> Void) -> some View {
+    private func navRow(_ title: String, icon: String, selected: Bool, count: Int = 0, bytes: Int64? = nil,
+                        selectedCount: Int = 0, selectedBytes: Int64 = 0, action: @escaping () -> Void) -> some View {
         Button(action: action) {
+            VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 10) {
                 Image(systemName: icon).frame(width: 18)
                 if compact {
@@ -244,10 +264,24 @@ struct ContentView: View {
                     Text(count, format: .number).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                   }
                 }
+            }
+            if bytes != nil {
+                selectedCategoryLabel(count: selectedCount, bytes: selectedBytes).padding(.leading, 28)
+            }
             }.padding(.horizontal, compact ? 8 : 12).padding(.vertical, bytes == nil ? 9 : 6)
                 .foregroundStyle(selected ? theme.accent : theme.text.opacity(0.85))
-                .background(selected ? brandBlue.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 9))
+                .background(selected ? brandBlue.opacity(0.26) : .clear, in: RoundedRectangle(cornerRadius: 9))
+                .overlay { RoundedRectangle(cornerRadius: 9).stroke(selected ? theme.accent : .clear, lineWidth: 1.5) }
+                .overlay(alignment: .leading) {
+                    Capsule().fill(selected ? theme.accent : .clear).frame(width: 3).padding(.vertical, 6)
+                }
         }.buttonStyle(.plain).disabled(purgeable.busy || videos.busy)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+    private func selectedCategoryLabel(count: Int, bytes: Int64) -> some View {
+        Label("\(count.formatted()) selected · \(formatBytes(bytes))", systemImage: count > 0 ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: 9)).monospacedDigit().lineLimit(1)
+            .foregroundStyle(count > 0 ? theme.accent : theme.text.opacity(0.5))
     }
     private var header: some View {
         Group {
@@ -305,15 +339,17 @@ struct ContentView: View {
             spaceChart
             VStack(alignment: .leading, spacing: 5) {
                 Text("SPACE TO REVIEW").font(.system(size: 10, weight: .medium)).tracking(1.5).foregroundStyle(.secondary)
-                Text(formatBytes(model.candidateBytes)).font(.system(size: compact ? 27 : 38, weight: .semibold, design: .rounded))
+                Text(formatBytes(model.summaryBytes)).font(.system(size: compact ? 27 : 38, weight: .semibold, design: .rounded))
                     .lineLimit(1).minimumScaleFactor(0.8)
+                Label("\(model.summarySelectedCount.formatted()) files · \(formatBytes(model.summarySelectedBytes)) selected", systemImage: model.summarySelectedCount > 0 ? "checkmark.circle.fill" : "circle")
+                    .font(.caption).foregroundStyle(model.summarySelectedCount > 0 ? theme.accent : theme.text.opacity(0.5))
                 Text(compact ? "Logical sizes; actual disk savings can differ." : "Logical file sizes, not guaranteed disk savings.\nAPFS clones and compression can affect actual space.")
                     .font(compact ? .caption2 : .caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
             if compact {
                 Menu {
-                    ForEach(CleanupCategory.allCases.filter { $0 != .videos && model.bytes($0) > 0 }) { category in
+                    ForEach(model.summaryCategories) { category in
                         Button("\(category.rawValue) · \(formatBytes(model.bytes(category)))") { model.activeCategory = category }
                     }
                 } label: { Image(systemName: "chart.pie").font(.title3).accessibilityLabel("Category sizes") }
@@ -324,7 +360,7 @@ struct ContentView: View {
     private var spaceChart: some View {
         Chart {
             ForEach(Array(CleanupCategory.allCases.filter { $0 != .videos }.enumerated()), id: \.element.id) { index, category in
-                if model.bytes(category) > 0 {
+                if model.summaryCategories.contains(category) {
                     SectorMark(angle: .value("Bytes", model.bytes(category)), innerRadius: .ratio(0.77), angularInset: 3)
                         .cornerRadius(3).foregroundStyle(palette[index])
                 }
@@ -336,7 +372,7 @@ struct ContentView: View {
     private var overviewLegend: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(CleanupCategory.allCases.filter { $0 != .videos }.enumerated()), id: \.element.id) { index, category in
-                if model.bytes(category) > 0 {
+                if model.summaryCategories.contains(category) {
                     Button { model.activeCategory = category } label: {
                         HStack {
                             Circle().fill(palette[index]).frame(width: 6, height: 6)
@@ -366,12 +402,13 @@ struct ContentView: View {
                 ContentUnavailableView(model.isFiltering ? "Searching…" : (model.isScanning ? "Looking for more files" : "Nothing to review here"),
                                        systemImage: model.isFiltering ? "magnifyingglass" : "checkmark.seal",
                                        description: Text(model.isFiltering ? "Matching names and paths in this section." : (model.isScanning ? "More verified results will appear as scanning continues." : "Try another category or adjust your scan settings.")))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(pageFiles) { item in
                     HStack(spacing: compact ? 8 : 12) {
                         Toggle("Select \(item.url.lastPathComponent)", isOn: Binding(get: { model.selection.contains(item.id) }, set: { selected in
                             model.setSelection(item, selected: selected)
-                        })).labelsHidden().toggleStyle(.checkbox).disabled(item.keeper || model.isCleaning || model.isFiltering)
+                        })).labelsHidden().toggleStyle(.checkbox).disabled(item.keeper || model.isQueued(item) || model.isFiltering)
                         Button { model.toggleSelection(item) } label: {
                             HStack(spacing: compact ? 8 : 12) {
                                 CandidateFileIcon(path: item.id)
@@ -392,7 +429,7 @@ struct ContentView: View {
                                 Text(formatBytes(item.bytes)).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(.secondary).fixedSize()
                             }
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 7).contentShape(Rectangle())
-                        }.buttonStyle(.plain).disabled(item.keeper || model.isCleaning || model.isFiltering)
+                        }.buttonStyle(.plain).disabled(item.keeper || model.isQueued(item) || model.isFiltering)
                         Button { preview = item.url } label: { Image(systemName: "eye") }.buttonStyle(.borderless).help("Quick Look")
                         Button { NSWorkspace.shared.activateFileViewerSelecting([item.url]) } label: { Image(systemName: "folder") }.buttonStyle(.borderless).help("Reveal in Finder")
                     }.listRowBackground(model.selection.contains(item.id) ? theme.accent.opacity(0.12) : theme.card).contextMenu {
@@ -419,7 +456,7 @@ struct ContentView: View {
         HStack(spacing: 10) {
             Toggle("Select all", isOn: Binding(get: { model.allVisibleSelected }, set: { model.setVisibleSelection($0) }))
                 .toggleStyle(.checkbox).fixedSize()
-                .disabled(model.isCleaning || model.isFiltering || model.visibleSelectableCount == 0)
+                .disabled(model.isFiltering || model.visibleSelectableCount == 0)
                 .help("Select all matching files across every page. Protected originals remain unselected.")
             Text("\(model.visible.count.formatted()) files").font(.subheadline.bold()).lineLimit(1)
             if model.isFiltering || model.isScanning {
@@ -444,11 +481,15 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(model.selection.isEmpty ? "Nothing selected" : "\(model.selection.count.formatted()) files · \(formatBytes(model.selectedBytes)) selected")
                         .font(.subheadline.bold()).lineLimit(1).minimumScaleFactor(0.85)
-                    Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(compact ? 2 : 3)
+                    if model.hasSelectionOutsideCategory {
+                        Text("Includes files selected in other categories.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text(model.isCleaning ? "Background cleanup is running. Each job reports its progress below." : model.status)
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(compact ? 2 : 3)
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 Button { model.refreshRunningBrowsers(); showConfirmation = true } label: { Label("Review cleanup", systemImage: "trash") }
                     .buttonStyle(BrandButtonStyle()).controlSize(.large).fixedSize()
-                    .disabled(model.selection.isEmpty || model.isCleaning)
+                    .disabled(model.chosen.isEmpty || purgeable.busy || videos.busy)
             }.padding(.horizontal, inset).padding(.vertical, compact ? 12 : 20)
         }
     }
@@ -486,6 +527,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 18) {
             Label("One last look.", systemImage: "trash").font(.title2.bold())
             Text("Move \(model.chosen.count) files (\(formatBytes(model.selectedBytes))) to Trash?")
+            Text("Each selected category starts a separate background job. Follow file counts below while reviewing other categories.").font(.subheadline).foregroundStyle(.secondary)
             Text("Nothing will be permanently deleted. Files in Downloads and large-file results may contain personal data. Confirm that you no longer need each selected item.").font(.subheadline).foregroundStyle(.secondary)
             if model.chosen.contains(where: { $0.category == .browsers }) {
                 GroupBox("Browser caches") {

@@ -1,17 +1,17 @@
 {
   "files.exclude": {
-    "**/.git": true,
-    "**/.svn": true,
-    "**/.hg": true,
-    "**/.jj": true,
-    "**/.DS_Store": true,
-    "**/Thumbs.db": true,
-    "**/flutter/ephemeral": true,
-    "**/Flutter/ephemeral": true,
-    "**/.symlinks": true,
-    "**/.plugin_symlinks": true,
-    "**/.widget_preview": true,
-    "**/CVS": true,
-    "**/.ruby-lsp": true
+    "**/.git": false,
+    "**/.svn": false,
+    "**/.hg": false,
+    "**/.jj": false,
+    "**/.DS_Store": false,
+    "**/Thumbs.db": false,
+    "**/flutter/ephemeral": false,
+    "**/Flutter/ephemeral": false,
+    "**/.symlinks": false,
+    "**/.plugin_symlinks": false,
+    "**/.widget_preview": false,
+    "**/CVS": false,
+    "**/.ruby-lsp": false
   }
 }

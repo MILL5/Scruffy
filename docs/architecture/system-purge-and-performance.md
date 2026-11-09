@@ -4,7 +4,7 @@
 
 The Purgeable Space panel offers an actionable **Clean purgeable data** control independent of Time Machine snapshots. It delegates to macOS CacheDelete, restricted to `com.apple.fspurgeable_data` and `com.apple.cache_delete_app_container_caches`. Cloud-document eviction, Time Machine, system-update snapshots and system assets are not in this allowlist. The separate Time Machine action remains explicitly reviewed and administrator-approved.
 
-The system-purge control requires a confirmation and acknowledgement: it bypasses Trash, so discarded cache content is not recoverable through Scruffy. macOS decides which eligible content it can release. The target is not a guaranteed amount.
+The system-purge control requires a confirmation and acknowledgement: it bypasses Trash, so discarded cache content is not recoverable through Scruffy. It requests all eligible data, with no size selector or app-imposed cap. The helper queries and validates current eligibility immediately before purging, then requests that entire reported amount. It accepts only `probe` or `purge`, with no user-supplied amount argument. macOS decides which eligible content it can release; the estimate is not a guaranteed removal count.
 
 CacheDelete is undocumented and not an App Store API. It is dynamically resolved in an isolated, unprivileged helper. Missing symbols, failed queries, unexpected volume/service responses, negative values and ignored service filters fail closed. A fresh read-only query checks the service filter before every purge. The helper has finite query/operation deadlines so failure cannot hang the UI indefinitely. A private-interface change may disable this feature or crash only the helper; Scruffy reports failure rather than falling back to direct deletion or disk-filling pressure tricks.
 
@@ -15,10 +15,12 @@ Signatures were cross-checked against the local Xcode SDK's CacheDelete symbol d
 - Snapshot/capacity and system-purge queries execute independently and publish as each completes.
 - Cached results stay visible. Read-only refresh and actual cleanup have separate busy states; a ready system result can be cleaned while snapshot information is still loading.
 - Visible-pane checks run at most once per minute, with a short freshness window on foreground entry. There is no periodic full filesystem scan and no speculative deletion.
-- Filesystem scans publish cumulative, verified results incrementally. Cache candidates appear first; personal duplicate groups publish only after their contents and protected original are established.
+- Filesystem scans publish cumulative, verified results incrementally in sidebar order: Duplicates, Old downloads, Browser caches, Developer caches, Temporary files, Large files, then Videos. Disabled categories are skipped. Personal duplicate groups publish only after their contents and protected original are established.
+- Personal folders are inventoried once, at the first enabled personal-file category. Other personal candidates and videos wait for their category's turn, so later sections do not populate early or change already-published category totals. Scanning remains off the main thread.
 - Largest same-size groups are processed first. Bounded 64 KiB head/tail look-ahead avoids reading entire files when those samples differ. Full SHA-256 is still required before declaring duplicates.
 - Ancestor metadata is cached during discovery with identity checks. Cleanup still revalidates paths and fingerprints freshly.
 - Ready files remain selectable during scanning. Successfully trashed paths are excluded from later progress updates; expired scan callbacks cannot replace newer results.
+- An app-scoped hourglass cursor indicates scans, Trash moves, video compression, recovery-history loading and visible storage checks/cleanup. Mouse events still reach controls. Completing or failing the operation, detaching the view or moving to another window restores normal cursor handling. Trash cleanup additionally shows named category jobs with determinate file counts, phases and retained failures; other file categories stay usable while those workers run.
 
 ## Checks
 

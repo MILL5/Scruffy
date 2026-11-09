@@ -286,17 +286,23 @@ public struct CleanupScanner: Sendable {
         }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
-    /// Progressive updates contain only ready-to-review files: cache candidates or
-    /// fully verified personal size groups. The callback runs serially on the caller.
+    /// Progressive updates follow sidebar order and contain only ready-to-review files.
+    /// Personal folders are enumerated once; later categories wait for their turn.
+    /// The callback runs serially on the caller.
     public func scan(_ options: ScanOptions,
                      progress: (@Sendable (ScanResult, String) -> Void)? = nil) throws -> ScanResult {
         var items: [String: Candidate] = [:]
+        var personalReady: [String: Candidate] = [:]
+        var pendingVideos: [String: Candidate] = [:]
         var ready: [String: Candidate] = [:]
         var videoReady: [String: Candidate] = [:]
         var notes = Set<String>()
         var ancestorCache: [String: DirectoryIdentity] = [:]
         var visited = Set<String>()
         var enumerated = 0
+        var personalScanned = false
+        var personalPhase = "Finding personal files"
+        var personalCategory: CleanupCategory?
         var lastPublish = Date.distantPast
         var cachedSnapshot: ScanResult?
         var snapshotFileCount = -1, snapshotNoteCount = -1
@@ -325,7 +331,7 @@ public struct CleanupScanner: Sendable {
         }
         func walk(_ root: URL, category: CleanupCategory?, age: TimeInterval = 0) throws {
             guard fm.fileExists(atPath: root.path) else { return }
-            guard allowed(root, ancestorCache: &ancestorCache) || root == home else {
+            guard allowed(root, ancestorCache: &ancestorCache) || root == home || (category == .temporary && root == temp) else {
                 notes.insert("Skipped protected location: \(root.path)"); return
             }
             guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .contentAccessDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { url, _ in
@@ -343,10 +349,12 @@ public struct CleanupScanner: Sendable {
                       values.isRegularFile == true, values.isPackage != true,
                       let fingerprint = try? Fingerprint.read(url), fingerprint.links == 1, fingerprint.size > 0 else { continue }
                 enumerated += 1
+                publish(category.map { "Scanning \($0.rawValue.lowercased())" } ?? personalPhase)
                 let lastUse = max(fingerprint.modified, values.contentAccessDate ?? fingerprint.modified)
                 if category == nil && options.videos && VideoCompressionService.supportedExtensions.contains(url.pathExtension.lowercased()) {
-                    videoReady[url.path] = Candidate(url: url, category: .videos, fingerprint: fingerprint)
-                    publish("Finding videos")
+                    let video = Candidate(url: url, category: .videos, fingerprint: fingerprint)
+                    if personalCategory == .videos { videoReady[video.id] = video }
+                    else { pendingVideos[video.id] = video }
                 }
                 if age > 0 && now.timeIntervalSince(lastUse) < age { continue }
                 let selectedCategory: CleanupCategory
@@ -358,30 +366,31 @@ public struct CleanupScanner: Sendable {
                 else { continue }
                 let item = Candidate(url: url, category: selectedCategory, fingerprint: fingerprint)
                 if category == nil && options.duplicates { items[item.id] = item }
-                if category != nil || !options.duplicates { ready[item.id] = item }
-                publish(category == nil ? "Looking ahead for duplicates" : "Scanning \(selectedCategory.rawValue.lowercased())")
+                else if category == nil && personalCategory != selectedCategory { personalReady[item.id] = item }
+                else { ready[item.id] = item }
             }
-            publish("Scanning", force: true)
+            publish(category.map { "Scanning \($0.rawValue.lowercased())" } ?? personalPhase, force: true)
         }
-        // Small, independently cleanable caches become usable before personal-file
-        // enumeration and hashing, rather than waiting behind a large Downloads folder.
-        if options.browsers {
-            for root in browserRoots { try walk(root, category: .browsers, age: 86400) }
-            for root in profileRoots {
-                for profile in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
-                    where profile.lastPathComponent == "Default" || profile.lastPathComponent.hasPrefix("Profile ") {
-                    for name in ["Cache", "Code Cache", "GPUCache"] { try walk(profile.appendingPathComponent(name), category: .browsers, age: 86400) }
-                }
-            }
-            let firefox = home.appendingPathComponent("Library/Caches/Firefox/Profiles")
-            for profile in (try? fm.contentsOfDirectory(at: firefox, includingPropertiesForKeys: nil)) ?? [] {
-                try walk(profile.appendingPathComponent("cache2"), category: .browsers, age: 86400)
-            }
+        func preparePersonal(_ phase: String, category: CleanupCategory) throws {
+            guard !personalScanned else { return }
+            personalScanned = true
+            personalPhase = phase
+            personalCategory = category
+            for root in options.folders { try walk(root, category: nil) }
         }
-        if options.caches { for root in cacheRoots { try walk(root, category: .caches, age: 7 * 86400) } }
-        if options.temporary { try walk(temp, category: .temporary, age: 7 * 86400) }
-        for root in options.folders { try walk(root, category: nil) }
+        func publishPersonal(_ category: CleanupCategory) throws {
+            let phase = "Scanning \(category.rawValue.lowercased())"
+            try preparePersonal(phase, category: category)
+            for item in personalReady.values.filter({ $0.category == category }).sorted(by: Candidate.largestFirst) {
+                try Task.checkCancellation()
+                ready[item.id] = item
+                publish(phase)
+            }
+            publish(phase, force: true)
+        }
+        // Keep this sequence aligned with CleanupCategory.allCases (the sidebar).
         if options.duplicates {
+            try preparePersonal("Finding duplicate candidates", category: .duplicates)
             let personal = items.values.filter { [.duplicates, .downloads, .large].contains($0.category) }
             let sizes = Dictionary(grouping: personal, by: { $0.bytes })
             // Largest potential savings first. A completed group can be cleaned while
@@ -437,11 +446,47 @@ public struct CleanupScanner: Sendable {
                 } else {
                     verified = Dictionary(uniqueKeysWithValues: group.map { ($0.id, $0) })
                 }
-                for item in verified.values where item.category != .duplicates || item.duplicateHash != nil {
-                    ready[item.id] = item
+                for item in verified.values {
+                    if item.category == .duplicates {
+                        if item.duplicateHash != nil { ready[item.id] = item }
+                    } else { personalReady[item.id] = item }
                 }
                 publish("Duplicate group ready")
             }
+            publish("Scanning duplicates", force: true)
+        }
+        if options.downloads { try publishPersonal(.downloads) }
+        if options.browsers {
+            for root in browserRoots { try walk(root, category: .browsers, age: 86400) }
+            for root in profileRoots {
+                for profile in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+                    where profile.lastPathComponent == "Default" || profile.lastPathComponent.hasPrefix("Profile ") {
+                    for name in ["Cache", "Code Cache", "GPUCache"] { try walk(profile.appendingPathComponent(name), category: .browsers, age: 86400) }
+                }
+            }
+            let firefox = home.appendingPathComponent("Library/Caches/Firefox/Profiles")
+            for profile in (try? fm.contentsOfDirectory(at: firefox, includingPropertiesForKeys: nil)) ?? [] {
+                try walk(profile.appendingPathComponent("cache2"), category: .browsers, age: 86400)
+            }
+            publish("Scanning browser caches", force: true)
+        }
+        if options.caches {
+            for root in cacheRoots { try walk(root, category: .caches, age: 7 * 86400) }
+            publish("Scanning developer caches", force: true)
+        }
+        if options.temporary {
+            try walk(temp, category: .temporary, age: 7 * 86400)
+            publish("Scanning temporary files", force: true)
+        }
+        if options.large { try publishPersonal(.large) }
+        if options.videos {
+            try preparePersonal("Finding videos", category: .videos)
+            for item in pendingVideos.values.sorted(by: Candidate.largestFirst) {
+                try Task.checkCancellation()
+                videoReady[item.id] = item
+                publish("Scanning videos")
+            }
+            publish("Scanning videos", force: true)
         }
         publish("Scan complete", force: true)
         return snapshot()

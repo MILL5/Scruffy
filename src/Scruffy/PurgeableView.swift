@@ -12,7 +12,6 @@ final class PurgeableModel: ObservableObject {
     @Published var message: String?
     @Published var error: String?
     @Published var snapshotError: String?
-    @Published var target: ReclaimTarget = .five
     @Published var systemCleanableBytes: Int64?
     @Published var systemError: String?
     private var generation = 0
@@ -74,12 +73,12 @@ final class PurgeableModel: ObservableObject {
     }
     func cleanSystemData() {
         guard canCleanSystem else { return }
-        let client = systemClient, target = target
+        let client = systemClient
         generation += 1
         busy = true; error = nil; message = "Asking macOS to clean eligible purgeable data…"
         Task {
             do {
-                let result = try await Task.detached(priority: .userInitiated) { try client.clean(target: target) }.value
+                let result = try await Task.detached(priority: .userInitiated) { try client.clean() }.value
                 message = "macOS reports \(formatBytes(result.removedBytes ?? 0)) of purgeable data removed. Storage figures may take a moment to settle."
                 // A later read-only refresh failure must not erase a successful cleanup.
             } catch {
@@ -92,12 +91,11 @@ final class PurgeableModel: ObservableObject {
     }
     func reclaim() {
         guard canReclaimSnapshots else { return }
-        let target = target
         generation += 1
         busy = true; message = "Waiting for administrator approval, then asking macOS to reclaim snapshot space…"; error = nil
         Task {
             do {
-                try await Task.detached(priority: .userInitiated) { try PurgeableStorage().reclaim(target: target) }.value
+                try await Task.detached(priority: .userInitiated) { try PurgeableStorage().reclaim() }.value
                 message = "macOS completed the snapshot reclaim request. Storage figures may take a few minutes to settle."
             } catch {
                 self.error = error.localizedDescription
@@ -112,9 +110,12 @@ final class PurgeableModel: ObservableObject {
 struct PurgeableView: View {
     @ObservedObject var model: PurgeableModel
     @Environment(\.colorScheme) private var colorScheme
-    @State private var confirm = false
+    private enum Confirmation: String, Identifiable {
+        case system, snapshots
+        var id: String { rawValue }
+    }
+    @State private var confirmation: Confirmation?
     @State private var acknowledge = false
-    @State private var confirmSystem = false
     @State private var paneSize = CGSize(width: 895, height: 800)
     private var theme: ScruffyTheme { ScruffyTheme(scheme: colorScheme) }
     private var compact: Bool { paneSize.width < 720 || paneSize.height < 680 }
@@ -150,15 +151,12 @@ struct PurgeableView: View {
                         if report.snapshots.isEmpty {
                             Text("No eligible Time Machine snapshots found. You can still clean purgeable data above.").font(.subheadline.bold())
                         } else {
-                            Picker("Space to request", selection: $model.target) {
-                                ForEach(ReclaimTarget.allCases) { target in Text(target.title).tag(target) }
-                            }.frame(maxWidth: 280).disabled(model.busy)
-                            Text("This is a target, not a guarantee. macOS chooses which eligible snapshots to remove.").font(.caption).foregroundStyle(.secondary)
+                            Text("Requests all eligible snapshot space, with no app-imposed size limit. macOS decides which snapshots it can remove.").font(.caption).foregroundStyle(.secondary)
                         }
                         if report.protectedSnapshotCount > 0 {
                             Text("\(report.protectedSnapshotCount) system-update snapshots are protected and excluded.").font(.caption).foregroundStyle(.secondary)
                         }
-                        Button("Review snapshot reclaim…") { acknowledge = false; confirmSystem = false; confirm = true }
+                        Button("Review snapshot reclaim…") { acknowledge = false; confirmation = .snapshots }
                             .buttonStyle(BrandButtonStyle()).disabled(!model.canReclaimSnapshots)
                     }.padding(22).frame(maxWidth: .infinity, alignment: .leading)
                         .background(theme.card, in: RoundedRectangle(cornerRadius: 16))
@@ -203,26 +201,26 @@ struct PurgeableView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshIfNeeded()
         }
-        .sheet(isPresented: $confirm) {
+        .sheet(item: $confirmation) { action in
           ResponsiveSheet(width: 560, idealHeight: 600, windowSize: paneSize) {
             VStack(alignment: .leading, spacing: 20) {
-                Label(confirmSystem ? "Clean purgeable data?" : "Remove local restore points?", systemImage: "exclamationmark.triangle").font(.title2.bold())
-                if confirmSystem {
-                    Text("Ask macOS to clean a target of \(model.target.title) of eligible discardable data and app caches. The actual amount depends on what macOS agrees to release.")
+                Label(action == .system ? "Clean purgeable data?" : "Remove local restore points?", systemImage: "exclamationmark.triangle").font(.title2.bold())
+                if action == .system {
+                    Text("Ask macOS to remove all eligible discardable data and app caches, with no app-imposed size limit. The actual amount depends on what macOS agrees to release.")
                     Text("Cleanup bypasses Trash. Cached data may need to be rebuilt or downloaded again. This restricted request does not include cloud documents, Time Machine snapshots or system-update snapshots.")
                     Toggle("I understand this permanently removes eligible cache data.", isOn: $acknowledge)
                 } else {
-                    Text("Ask macOS to reclaim a target of \(model.target.title) from eligible local Time Machine snapshots on your startup disk. The actual amount can be smaller or larger because snapshots are removed as units.")
+                    Text("Ask macOS to reclaim as much space as possible from eligible local Time Machine snapshots on your startup disk, with no app-imposed size limit.")
                     Text("This bypasses Trash. Removed local snapshots cannot be restored by Scruffy. Current files and external backup-disk backups are not targeted. You may lose the ability to recover older or deleted files from these local restore points.")
                     Toggle("I understand that local restore points may be permanently removed.", isOn: $acknowledge)
                     Text("macOS will ask for administrator approval. Cancelling that prompt stops the request.").font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
-                    Button("Cancel", role: .cancel) { confirm = false }
+                    Button("Cancel", role: .cancel) { confirmation = nil }
                     Spacer()
-                    Button(confirmSystem ? "Clean purgeable data" : "Reclaim snapshot space") {
-                        confirm = false
-                        if confirmSystem { model.cleanSystemData() } else { model.reclaim() }
+                    Button(action == .system ? "Clean purgeable data" : "Reclaim snapshot space") {
+                        confirmation = nil
+                        if action == .system { model.cleanSystemData() } else { model.reclaim() }
                     }.buttonStyle(BrandButtonStyle()).disabled(!acknowledge)
                 }
             }
@@ -239,10 +237,9 @@ struct PurgeableView: View {
                 Text(error).font(.subheadline).foregroundStyle(.secondary)
             } else { Text("Checking macOS’s purgeable-data service…").foregroundStyle(.secondary) }
             Text("Ask macOS to remove data apps marked discardable and eligible app-container caches. This action does not target cloud documents, Time Machine snapshots or system-update snapshots. Apps may rebuild or download cache data afterward.").font(.subheadline)
-            Picker("Space to request", selection: $model.target) {
-                ForEach(ReclaimTarget.allCases) { target in Text(target.title).tag(target) }
-            }.frame(maxWidth: 280).disabled(model.busy)
-            Button("Clean purgeable data…") { acknowledge = false; confirmSystem = true; confirm = true }
+            Text("Requests all eligible data, with no app-imposed size limit. macOS decides how much it can release.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Clean purgeable data…") { acknowledge = false; confirmation = .system }
                 .buttonStyle(BrandButtonStyle()).disabled(!model.canCleanSystem)
         }.padding(22).frame(maxWidth: .infinity, alignment: .leading)
             .background(theme.card, in: RoundedRectangle(cornerRadius: 16))

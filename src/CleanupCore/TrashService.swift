@@ -17,15 +17,33 @@ public struct CleanupOutcome: Sendable {
     public var skippedIDs: [String] = []
 }
 
+public struct CleanupProgress: Sendable {
+    public enum Phase: String, Sendable { case checking, moving }
+    public let phase: Phase
+    public let total: Int
+    public let checked: Int
+    public let moved: Int
+    public let skipped: Int
+    public let bytes: Int64
+    public let currentFile: String?
+    public var processed: Int { moved + skipped }
+    public init(phase: Phase, total: Int, checked: Int, moved: Int, skipped: Int, bytes: Int64, currentFile: String? = nil) {
+        self.phase = phase; self.total = total; self.checked = checked
+        self.moved = moved; self.skipped = skipped; self.bytes = bytes; self.currentFile = currentFile
+    }
+}
+
 public struct TrashService: Sendable {
     public let scanner: CleanupScanner
     public let journal: URL
+    private let history: TrashJournal
     public init(scanner: CleanupScanner = CleanupScanner(), journal: URL? = nil) {
         self.scanner = scanner
         self.journal = journal ?? scanner.home.appendingPathComponent("Library/Application Support/Scruffy/trash-history.json")
+        history = TrashJournal(url: self.journal)
     }
     public func records() throws -> [TrashRecord] {
-        try TrashJournal(url: journal).records()
+        try history.records()
     }
     private func staleFile(_ item: Candidate, all: [Candidate], error: Error) -> Bool {
         guard let safety = error as? SafetyError else { return false }
@@ -50,6 +68,7 @@ public struct TrashService: Sendable {
     }
     public func clean(_ selected: [Candidate], all: [Candidate], folders: [URL],
                       browsersRunning: @Sendable () async -> Bool,
+                      progress: (@Sendable (CleanupProgress) -> Void)? = nil,
                       moveToTrash: @Sendable (URL) throws -> URL = { url in
                           var result: NSURL?
                           try FileManager.default.trashItem(at: url, resultingItemURL: &result)
@@ -57,6 +76,21 @@ public struct TrashService: Sendable {
                           return result as URL
                       }) async throws -> CleanupOutcome {
         var outcome = CleanupOutcome()
+        var checked = 0
+        var phase = CleanupProgress.Phase.checking
+        var currentFile = selected.first?.url.lastPathComponent
+        var lastReport = ContinuousClock.now
+        func report(force: Bool = false) {
+            guard let progress else { return }
+            let now = ContinuousClock.now
+            guard force || lastReport.duration(to: now) >= .milliseconds(200) else { return }
+            lastReport = now
+            progress(CleanupProgress(phase: phase, total: selected.count, checked: checked,
+                                     moved: outcome.count, skipped: outcome.skippedIDs.count,
+                                     bytes: outcome.bytes, currentFile: currentFile))
+        }
+        report(force: true)
+        defer { report(force: true) }
         if selected.contains(where: { $0.category == .browsers }), await browsersRunning() {
             outcome.errors.append(SafetyError.browserRunning.localizedDescription)
             return outcome
@@ -67,18 +101,28 @@ public struct TrashService: Sendable {
         approved.reserveCapacity(selected.count)
         for item in selected {
             try Task.checkCancellation()
-            do { try scanner.validateSelection([item], all: all, folders: folders) }
+            currentFile = item.url.lastPathComponent
+            report()
+            do { try autoreleasepool { try scanner.validateSelection([item], all: all, folders: folders) } }
             catch {
                 guard staleFile(item, all: all, error: error) else { throw error }
                 outcome.skippedIDs.append(item.id)
+                checked += 1
                 continue
             }
             approved.append(item)
+            checked += 1
         }
         guard !approved.isEmpty else { return outcome }
-        let history = TrashJournal(url: journal)
-        _ = try history.records() // Validate once before moving; subsequent journal appends stay constant-size.
+        currentFile = nil
+        report(force: true)
+        try autoreleasepool { _ = try history.records() } // Validate once; subsequent appends stay constant-size.
+        phase = .moving
+        currentFile = approved.first?.url.lastPathComponent
+        report(force: true)
         for item in approved {
+            currentFile = item.url.lastPathComponent
+            report()
             var intentID: UUID?
             var attemptedMove = false
             do {
@@ -86,22 +130,26 @@ public struct TrashService: Sendable {
                 if item.category == .browsers {
                     if await browsersRunning() { throw SafetyError.browserRunning }
                 }
-                try scanner.validateSelection([item], all: all, folders: folders)
-                // Persist intent first; if interrupted, the original path remains in the recovery history.
-                let id = UUID()
-                let date = Date()
-                try history.append(TrashRecord(id: id, original: item.url, trashed: nil, fingerprint: item.fingerprint, date: date))
-                intentID = id
-                attemptedMove = true
-                let trashURL = try moveToTrash(item.url)
-                outcome.count += 1
-                outcome.bytes += item.bytes
-                outcome.movedIDs.append(item.id)
-                do { try history.append(TrashRecord(id: id, original: item.url, trashed: trashURL, fingerprint: item.fingerprint, date: date)) }
-                catch {
-                    outcome.errors.append("Moved to Trash, but recovery history could not be updated: \(item.url.path). Recover it using Finder’s Trash.")
-                    break
+                // Bound Foundation temporaries per file, even for queues containing hundreds of thousands of files.
+                let journalUpdated = try autoreleasepool {
+                    try scanner.validateSelection([item], all: all, folders: folders)
+                    // Persist intent first; an interrupted move remains in recovery history.
+                    let id = UUID(), date = Date()
+                    try history.append(TrashRecord(id: id, original: item.url, trashed: nil, fingerprint: item.fingerprint, date: date))
+                    intentID = id
+                    attemptedMove = true
+                    let trashURL = try moveToTrash(item.url)
+                    outcome.count += 1
+                    outcome.bytes += item.bytes
+                    outcome.movedIDs.append(item.id)
+                    do { try history.append(TrashRecord(id: id, original: item.url, trashed: trashURL, fingerprint: item.fingerprint, date: date)) }
+                    catch {
+                        outcome.errors.append("Moved to Trash, but recovery history could not be updated: \(item.url.path). Recover it using Finder’s Trash.")
+                        return false
+                    }
+                    return true
                 }
+                if !journalUpdated { break }
             } catch {
                 if !attemptedMove && staleFile(item, all: all, error: error) {
                     outcome.skippedIDs.append(item.id)
@@ -130,6 +178,6 @@ public struct TrashService: Sendable {
         }
         // Never replace existing files and never create missing folder trees.
         try FileManager.default.moveItem(at: trashed, to: record.original)
-        try TrashJournal(url: journal).remove(record.id)
+        try history.remove(record.id)
     }
 }
