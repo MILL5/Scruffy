@@ -38,5 +38,6 @@ Change these only when asked, and add a test that fails without the change.
 ## Conventions
 
 - Tests never touch real personal files, the real Trash, running browsers or system purge.
+- On someone's real Mac, do not change the app's saved settings (`defaults` domain `com.richcrane.scruffy`) and do not drive its window while they are using it. If a check needs either, say so first, use fixture files you created, and put the settings back before handing the app back.
 - Record what was and was not verified in `docs/verification/<date>.md`, and link it from `docs/README.md`.
 - User-facing sizes are decimal (`ByteCountFormatter` file style).
