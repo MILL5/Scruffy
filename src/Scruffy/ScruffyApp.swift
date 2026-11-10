@@ -4,8 +4,30 @@ import Charts
 import QuickLook
 import CleanupCore
 
+/// Brings the window back after it was closed. The app keeps running without a window so that
+/// background cleanup jobs can finish; clicking the Dock icon or opening Scruffy again must show it.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    @MainActor static var openMainWindow: (() -> Void)?
+    @MainActor private func showWindowIfNone() {
+        guard !NSApplication.shared.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) else { return }
+        Self.openMainWindow?()
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showWindowIfNone() }
+        return true
+    }
+    func applicationDidBecomeActive(_ notification: Notification) { showWindowIfNone() }
+    /// True while a cleanup job is moving files. Closing the window then leaves the app running.
+    @MainActor static var keepRunningWithoutWindow: () -> Bool = { false }
+    /// Closing the window quits Scruffy, unless a cleanup is still working in the background.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        !Self.keepRunningWithoutWindow()
+    }
+}
+
 @main
 struct ScruffyApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model: AppModel
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
     @State private var showAbout = false
@@ -14,6 +36,7 @@ struct ScruffyApp: App {
         SingleInstanceLock.enforce()
         let model = AppModel(settings: .standard)
         Task { await model.tidyRecoveryHistory() }
+        AppDelegate.keepRunningWithoutWindow = { model.isCleaning }
         _model = StateObject(wrappedValue: model)
     }
     private var launchSize: CGSize {
@@ -22,7 +45,7 @@ struct ScruffyApp: App {
                       height: min(800, max(360, screen.height - 64)))
     }
     var body: some Scene {
-        WindowGroup("Scruffy") {
+        Window("Scruffy", id: "main") {
             ContentView(model: model, showAbout: $showAbout, showSettings: $showSettings)
                 .preferredColorScheme(Appearance(rawValue: appearance)?.colorScheme)
                 .frame(minWidth: min(720, launchSize.width), minHeight: min(540, launchSize.height))
@@ -115,6 +138,7 @@ struct ContentView: View {
     @Binding var showAbout: Bool
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.openWindow) private var openWindow
     private var theme: ScruffyTheme { ScruffyTheme(scheme: colorScheme) }
     @Binding var showSettings: Bool
     @State private var showHistory = false
@@ -181,7 +205,11 @@ struct ContentView: View {
                   }
           }
           }
-          .onAppear { windowSize = geometry.size }
+          .onAppear {
+              windowSize = geometry.size
+              let open = openWindow
+              AppDelegate.openMainWindow = { open(id: "main") }
+          }
           .onChange(of: geometry.size) { _, size in windowSize = size }
         }
         .foregroundStyle(theme.text)
