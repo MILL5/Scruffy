@@ -314,7 +314,7 @@ final class CleanupJobsTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(model.latestScanSnapshot?.id, finalSource.id)
         XCTAssertNil(model.result?.filesByID[marker.id], "Fixture must overlap the pending final publication with the old committed snapshot")
         await model.applyCleanupOutcome(moved([files[1]]))
-        await publication.value
+        _ = await publication.value
 
         XCTAssertEqual(model.latestScanSnapshot?.id, finalSource.id)
         XCTAssertNotNil(model.result?.filesByID[marker.id])

@@ -14,7 +14,7 @@ APP="$OUT/Scruffy.app"
 DMG="$OUT/Scruffy.dmg"
 
 rm -rf "$OUT"; mkdir -p "$OUT"
-SCRUFFY_APP_PATH="$APP" SCRUFFY_SIGN_IDENTITY="$IDENTITY" SCRUFFY_UNIVERSAL=1 ./scripts/build-app.sh
+SCRUFFY_APP_PATH="$APP" SCRUFFY_SIGN_IDENTITY="$IDENTITY" ./scripts/build-app.sh
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
 codesign --verify --deep --strict --verbose "$APP"
 codesign -dvv "$APP" 2>&1 | grep -F "Authority=$IDENTITY"
@@ -43,6 +43,6 @@ printf 'Built %s (%s)\n%s\n' "$DMG" "$VERSION" "$NOTE"
 if [[ "${1:-}" == "--publish" ]]; then
     NOTES="docs/releases/$VERSION.md"
     test -f "$NOTES"
-    { cat "$NOTES"; printf '\n%s Requires macOS 14 or later, Apple silicon or Intel.\n' "$NOTE"; } > "$OUT/notes.md"
+    { cat "$NOTES"; printf '\n%s Requires macOS 26 or later on a Mac with Apple silicon.\n' "$NOTE"; } > "$OUT/notes.md"
     gh release create "v$VERSION" "$DMG" "$OUT/SHA256SUMS" --target main --title "Scruffy $VERSION" --notes-file "$OUT/notes.md"
 fi

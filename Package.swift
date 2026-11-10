@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Scruffy",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.0")],
     products: [.executable(name: "Scruffy", targets: ["Scruffy"]),
                .executable(name: "ScruffyStorageHelper", targets: ["ScruffyStorageHelper"])],
     targets: [

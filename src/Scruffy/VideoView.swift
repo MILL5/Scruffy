@@ -321,12 +321,12 @@ struct VideoView: View {
                 HStack(spacing: compact ? 8 : 12) {
                     Image(systemName: "film").font(.title2).foregroundStyle(theme.accent).frame(width: 27)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(item.url.lastPathComponent).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
-                        Text(item.url.deletingLastPathComponent().path)
-                            .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        Text(item.url.lastPathComponent).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                        Text(item.url.deletingLastPathComponent().path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~"))
+                            .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }.frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
                     Spacer(minLength: 4)
-                    Text(formatBytes(item.bytes)).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(.secondary).fixedSize()
+                    Text(formatBytes(item.bytes)).font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundStyle(.secondary).fixedSize()
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 9).contentShape(Rectangle())
             }.buttonStyle(.plain).disabled(model.busy || model.isFiltering || item.keeper)
             Button { preview = item.url } label: { Image(systemName: "eye") }.buttonStyle(.borderless).help("Quick Look")

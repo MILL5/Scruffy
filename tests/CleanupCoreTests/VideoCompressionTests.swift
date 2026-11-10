@@ -230,8 +230,6 @@ final class VideoCompressionTests: XCTestCase, @unchecked Sendable {
     }
 
     func testNativeHEVCExportPreservesMP4ResolutionDurationAndStereoAudio() async throws {
-        #if compiler(>=6.2)
-        guard #available(macOS 26, *) else { throw XCTSkip("The synthetic writer uses the current AVFoundation pixel-buffer receiver.") }
         let fixture = try Fixture(); defer { fixture.cleanup() }
         try FileManager.default.removeItem(at: fixture.source)
         try await makeNativeFixture(at: fixture.source, root: fixture.root)
@@ -260,13 +258,8 @@ final class VideoCompressionTests: XCTestCase, @unchecked Sendable {
         let videoFormats = try await video.load(.formatDescriptions)
         XCTAssertEqual(CMFormatDescriptionGetMediaSubType(try XCTUnwrap(videoFormats.first)), kCMVideoCodecType_HEVC)
         XCTAssertTrue(try fixture.stagingDirectories().isEmpty)
-        #else
-        throw XCTSkip("The native synthetic fixture requires the macOS 26 SDK; injected transaction tests still run.")
-        #endif
     }
 
-    #if compiler(>=6.2)
-    @available(macOS 26, *)
     private func makeNativeFixture(at destination: URL, root: URL) async throws {
         let videoURL = root.appendingPathComponent("fixture-video.mp4")
         let writer = try AVAssetWriter(outputURL: videoURL, fileType: .mp4)
@@ -325,7 +318,6 @@ final class VideoCompressionTests: XCTestCase, @unchecked Sendable {
         let handle = try FileHandle(forWritingTo: destination)
         try handle.seekToEnd(); try handle.write(contentsOf: padding); try handle.close()
     }
-    #endif
 
     private func appendLE<T: FixedWidthInteger>(_ number: T, to data: inout Data) {
         var number = number.littleEndian
