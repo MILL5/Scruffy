@@ -5,11 +5,15 @@ struct CleanupJobsView: View {
     let historyError: String?
     let availableSize: CGSize
     @Binding var isExpanded: Bool
+    var onUndo: (UUID) -> Void = { _ in }
+    var removable: Set<UUID> = []
+    var onRemove: (UUID) -> Void = { _ in }
     @Environment(\.colorScheme) private var colorScheme
     private var theme: ScruffyTheme { ScruffyTheme(scheme: colorScheme) }
-    init(jobs: [CleanupJob], historyError: String?, availableSize: CGSize, isExpanded: Binding<Bool> = .constant(true)) {
+    init(jobs: [CleanupJob], historyError: String?, availableSize: CGSize, isExpanded: Binding<Bool> = .constant(true),
+         onUndo: @escaping (UUID) -> Void = { _ in }, removable: Set<UUID> = [], onRemove: @escaping (UUID) -> Void = { _ in }) {
         self.jobs = jobs; self.historyError = historyError; self.availableSize = availableSize
-        _isExpanded = isExpanded
+        _isExpanded = isExpanded; self.onUndo = onUndo; self.removable = removable; self.onRemove = onRemove
     }
     private var columns: Int { availableSize.width >= 680 ? 2 : 1 }
     private var running: Int { jobs.filter { $0.state.isRunning }.count }
@@ -40,7 +44,7 @@ struct CleanupJobsView: View {
               if let historyError { Text(historyError).font(.caption).foregroundStyle(.red).padding(.horizontal, 16) }
             ScrollView {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .top), count: columns), spacing: 8) {
-                    ForEach(orderedJobs) { job in CleanupJobRow(job: job, theme: theme) }
+                    ForEach(orderedJobs) { job in CleanupJobRow(job: job, theme: theme, canRemove: removable.contains(job.id), undo: { onUndo(job.id) }, remove: { onRemove(job.id) }) }
                 }.padding(.horizontal, 16).padding(.bottom, 8)
             }
             }
@@ -53,6 +57,9 @@ struct CleanupJobsView: View {
 private struct CleanupJobRow: View {
     let job: CleanupJob
     let theme: ScruffyTheme
+    var canRemove = false
+    var undo: () -> Void = {}
+    var remove: () -> Void = {}
     @State private var details = false
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -60,7 +67,14 @@ private struct CleanupJobRow: View {
                 Label(job.name, systemImage: job.state == .failed ? "exclamationmark.circle" : (job.state == .completed ? "checkmark.circle" : "tray.and.arrow.down"))
                     .font(.caption.bold()).lineLimit(1)
                 Spacer(minLength: 2)
-                if job.state.isRunning { Text(job.startedAt, style: .timer).font(.caption2.monospacedDigit()) }
+                if job.state.isRunning && job.state != .undoing { Text(job.startedAt, style: .timer).font(.caption2.monospacedDigit()) }
+                if canRemove {
+                    Button("Remove", action: remove).font(.caption).buttonStyle(.borderless)
+                        .help("Nothing from this job is left in Trash. Take it off this list.")
+                } else if job.canUndo {
+                    Button("Undo", action: undo).font(.caption).buttonStyle(.borderless)
+                        .help("Put back the files this job moved that are still in Trash")
+                }
                 Button { details = true } label: { Image(systemName: "info.circle") }
                     .buttonStyle(.borderless).accessibilityLabel("Details for \(job.name)")
             }
@@ -83,6 +97,10 @@ private struct CleanupJobRow: View {
                     Text(job.status).monospacedDigit()
                     Text("\(job.moved.formatted()) moved · \(job.skipped.formatted()) skipped · \(formatBytes(job.bytes))")
                     if let current = job.currentFile { Text(current).font(.caption).textSelection(.enabled) }
+                    if let timings = job.timings {
+                        Text("Where the time went").fontWeight(.semibold)
+                        Text(timings.summary).font(.caption).monospacedDigit().textSelection(.enabled)
+                    }
                     if let failure = job.failure {
                         Text("This worker will not resume automatically.").fontWeight(.semibold)
                         Text(failure).font(.caption).textSelection(.enabled)

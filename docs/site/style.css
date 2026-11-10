@@ -145,6 +145,11 @@ summary::after { content: "+"; font-size: 23px; font-weight: 400; color: #7ccfe6
 details[open] summary::after { content: "−"; }
 details p { font-size: 14px; line-height: 1.75; color: #bdcdd5; margin-bottom: 22px; max-width: 62ch; }
 .safety-section :focus-visible { outline-color: #7ccfe6; }
+.faq-list { max-width: 820px; }
+.faq-list details, .faq-list details:first-child { border-color: var(--line); }
+.faq-list summary { font-size: 18px; }
+.faq-list summary::after { color: var(--cyan-deep); }
+.faq-list details p { color: var(--muted); font-size: 16px; }
 .maker-intro { display: flex; align-items: center; gap: 32px; margin-bottom: 43px; }
 .maker-intro > img { flex-shrink: 0; border-radius: 50%; }
 .maker-lead { color: var(--cyan-deep); font-size: 14px; font-weight: 600; margin-bottom: 7px; }

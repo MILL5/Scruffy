@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct StorageCapacity: Sendable {
@@ -61,10 +62,30 @@ public struct PurgeableStorage: Sendable {
             $0.range(of: #"^com\.apple\.TimeMachine\.\d{4}-\d{2}-\d{2}-\d{6}\.local$"#, options: .regularExpression) != nil
         }.sorted()
     }
-    public static func capacity(at url: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> StorageCapacity {
-        let values = try url.resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey])
-        guard let free = values.volumeAvailableCapacity, let total = values.volumeTotalCapacity else { throw PurgeableError.unsupportedCapacity }
-        return StorageCapacity(free: Int64(free), available: values.volumeAvailableCapacityForImportantUsage, total: Int64(total))
+    public static func capacity(at url: URL = URL(fileURLWithPath: SystemPurgePolicy.volume)) throws -> StorageCapacity {
+        var info = statfs()
+        guard statfs(url.path, &info) == 0, info.f_bsize > 0 else { throw PurgeableError.unsupportedCapacity }
+        let blockSize = UInt64(info.f_bsize)
+        let freeBytes = blockSize.multipliedReportingOverflow(by: info.f_bavail)
+        let totalBytes = blockSize.multipliedReportingOverflow(by: info.f_blocks)
+        guard !freeBytes.overflow, !totalBytes.overflow,
+              let free = Int64(exactly: freeBytes.partialValue), let total = Int64(exactly: totalBytes.partialValue) else {
+            throw PurgeableError.unsupportedCapacity
+        }
+        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return StorageCapacity(free: free, available: values?.volumeAvailableCapacityForImportantUsage, total: total)
+    }
+    public func measureReclaim<Output: Sendable>(settle: Duration = .seconds(3), _ operation: @Sendable () throws -> Output) async
+        -> (result: Result<Output, Error>, freeSpaceChange: Int64?) {
+        let before: Int64
+        do { before = try capacityReader().free }
+        catch { return (.failure(error), nil) }
+
+        let result = Result(catching: operation)
+        // Accounting can lag the command. Measure failed requests too, since cleanup can be partial.
+        try? await Task.sleep(for: settle)
+        let after = try? capacityReader().free
+        return (result, after.map { $0 - before })
     }
     public func report() throws -> StorageReport {
         let capacity = try capacityReader()

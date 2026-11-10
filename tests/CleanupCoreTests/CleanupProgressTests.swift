@@ -97,6 +97,54 @@ final class CleanupProgressTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try service.records().count, 2)
     }
 
+    /// Times everything Move to Trash does except the move itself, which is replaced by a
+    /// no-op. The printed per-file figures are the measurement; nothing asserts a duration.
+    func testCleanupReportsWhereTheTimeWentWithNoOpMove() async throws {
+        let fixture = Fixture(); defer { fixture.remove() }
+        let count = 1_000
+        let selected = try (0..<count).map { try fixture.candidate("cache-\($0)") }
+        let outcome = try await fixture.service.clean(selected, all: selected, folders: [fixture.downloads],
+                                                      browsersRunning: { false }, moveToTrash: { $0 })
+        XCTAssertEqual(outcome.count, count)
+        XCTAssertTrue(outcome.errors.isEmpty)
+        let timings = outcome.timings
+        XCTAssertEqual(timings["Checking: safety check before any move"]?.items, count)
+        XCTAssertEqual(timings["Moving: safety recheck"]?.items, count)
+        XCTAssertEqual(timings["Moving: move to Trash"]?.items, count)
+        XCTAssertEqual(timings["Moving: write recovery record"]?.items, count * 2)
+        XCTAssertEqual(timings["Browser-running check"]?.items, count + 1)
+        print("Cleanup timings for \(count) files with a no-op move:\n\(timings.summary)")
+    }
+
+    func testUndoRestoresWhatIsStillInTrashAndCountsTheRest() async throws {
+        let fixture = Fixture(); defer { fixture.remove() }
+        let selected = try ["back-a", "back-b", "emptied", "occupied"].map { try fixture.candidate($0) }
+        let other = try fixture.candidate("other-job")
+        let service = fixture.service, mover = try fixture.mover(), job = UUID()
+        let outcome = try await TrashService.$cleanupJob.withValue(job) {
+            try await service.clean(selected, all: selected + [other], folders: [fixture.downloads],
+                                    browsersRunning: { false }, moveToTrash: mover)
+        }
+        _ = try await service.clean([other], all: [other], folders: [fixture.downloads], browsersRunning: { false }, moveToTrash: mover)
+        XCTAssertEqual(outcome.count, 4)
+        let records = try service.records()
+        XCTAssertEqual(records.filter { $0.job == job }.count, 4)
+        let trashed = { (name: String) in try XCTUnwrap(records.first { $0.original.lastPathComponent == name }?.trashed) }
+        try FileManager.default.removeItem(at: try trashed("emptied"))
+        try Data("new file in the old place".utf8).write(to: selected[3].url)
+
+        let undone = try service.undo(job: job)
+        XCTAssertEqual(undone.total, 4)
+        XCTAssertEqual(undone.restored, 2)
+        XCTAssertEqual(undone.missing, 1)
+        XCTAssertEqual(undone.failed, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: selected[0].url.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: selected[1].url.path))
+        XCTAssertEqual(try String(contentsOf: selected[3].url, encoding: .utf8), "new file in the old place")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: other.url.path), "Another job's files stay in Trash")
+        XCTAssertEqual(try service.undo(job: job).restored, 0)
+    }
+
     func testFailedMoveReportsPartialFinalProgressAndOneTerminalError() async throws {
         let fixture = Fixture(); defer { fixture.remove() }
         let changed = try fixture.candidate("changed"), first = try fixture.candidate("first")

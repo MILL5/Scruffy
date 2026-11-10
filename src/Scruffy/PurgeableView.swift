@@ -17,7 +17,7 @@ final class PurgeableModel: ObservableObject {
     private var generation = 0
     private var lastRefresh: Date?
     var refreshing: Bool { checkingSnapshots || checkingSystem }
-    var canCleanSystem: Bool { !busy && !checkingSystem && (systemCleanableBytes ?? 0) > 0 }
+    var canCleanSystem: Bool { !busy && !checkingSystem && systemError == nil && (systemCleanableBytes ?? 0) > 0 }
     var canReclaimSnapshots: Bool { !busy && !checkingSnapshots && !(report?.snapshots.isEmpty ?? true) }
     private var systemClient: SystemPurgeClient {
         let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/ScruffyStorageHelper")
@@ -77,13 +77,12 @@ final class PurgeableModel: ObservableObject {
         generation += 1
         busy = true; error = nil; message = "Asking macOS to clean eligible purgeable data…"
         Task {
-            do {
-                let result = try await Task.detached(priority: .userInitiated) { try client.clean() }.value
-                message = "macOS reports \(formatBytes(result.removedBytes ?? 0)) of purgeable data removed. Storage figures may take a moment to settle."
-                // A later read-only refresh failure must not erase a successful cleanup.
-            } catch {
-                self.error = error.localizedDescription
-                message = "Refresh storage to check the current state before retrying."
+            let measurement = await Task.detached(priority: .userInitiated) {
+                await PurgeableStorage().measureReclaim { try client.clean() }
+            }.value
+            message = freeSpaceMessage(measurement.freeSpaceChange)
+            if case .failure(let failure) = measurement.result {
+                error = failure.localizedDescription
             }
             busy = false
             refresh()
@@ -94,16 +93,23 @@ final class PurgeableModel: ObservableObject {
         generation += 1
         busy = true; message = "Waiting for administrator approval, then asking macOS to reclaim snapshot space…"; error = nil
         Task {
-            do {
-                try await Task.detached(priority: .userInitiated) { try PurgeableStorage().reclaim() }.value
-                message = "macOS completed the snapshot reclaim request. Storage figures may take a few minutes to settle."
-            } catch {
-                self.error = error.localizedDescription
-                message = "Reclaim did not report completion. Refresh storage to check the current state."
+            let measurement = await Task.detached(priority: .userInitiated) {
+                let storage = PurgeableStorage()
+                return await storage.measureReclaim { try storage.reclaim() }
+            }.value
+            message = freeSpaceMessage(measurement.freeSpaceChange)
+            if case .failure(let failure) = measurement.result {
+                error = failure.localizedDescription
             }
             busy = false
             refresh()
         }
+    }
+    private func freeSpaceMessage(_ change: Int64?) -> String {
+        guard let change else { return "Could not verify the change in free space." }
+        if change > 0 { return "Free space increased by \(formatBytes(change)) during the request." }
+        if change < 0 { return "Free space decreased by \(formatBytes(-change)) during the request." }
+        return "Free space did not increase."
     }
 }
 
@@ -144,6 +150,10 @@ struct PurgeableView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 systemSection
+                if model.busy { HStack { ProgressView().controlSize(.small); Text(model.message ?? "Cleaning…").font(.subheadline) } }
+                else if model.refreshing { HStack { ProgressView().controlSize(.small); Text("Checking storage in the background. Ready items can be cleaned now.").font(.caption).foregroundStyle(.secondary) } }
+                if let message = model.message, !model.busy { Text(message).font(.subheadline).foregroundStyle(theme.accent) }
+                if let error = model.error { Label(error, systemImage: "exclamationmark.triangle").font(.subheadline).textSelection(.enabled) }
                 if let report = model.report {
                     VStack(alignment: .leading, spacing: 16) {
                         Label("Reclaim local snapshot space", systemImage: "clock.arrow.circlepath").font(.title3.bold()).foregroundStyle(theme.accent)
@@ -167,10 +177,6 @@ struct PurgeableView: View {
                         }
                     }
                 }
-                if model.busy { HStack { ProgressView().controlSize(.small); Text(model.message ?? "Cleaning…").font(.subheadline) } }
-                else if model.refreshing { HStack { ProgressView().controlSize(.small); Text("Checking storage in the background. Ready items can be cleaned now.").font(.caption).foregroundStyle(.secondary) } }
-                if let message = model.message, !model.busy { Text(message).font(.subheadline).foregroundStyle(theme.accent) }
-                if let error = model.error { Label(error, systemImage: "exclamationmark.triangle").font(.subheadline).textSelection(.enabled) }
                 if let error = model.snapshotError { Label(error, systemImage: "exclamationmark.triangle").font(.caption).textSelection(.enabled) }
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Other purgeable storage").font(.headline)
@@ -230,14 +236,15 @@ struct PurgeableView: View {
     private var systemSection: some View {
         VStack(alignment: .leading, spacing: 15) {
             Label("Clean purgeable data", systemImage: "sparkles").font(.title3.bold()).foregroundStyle(theme.accent)
-            if let bytes = model.systemCleanableBytes {
-                Text("\(formatBytes(bytes)) reported cleanable by macOS").font(.headline)
-                if model.checkingSystem { Text("Refreshing this estimate…").font(.caption).foregroundStyle(.secondary) }
+            if model.checkingSystem || (model.systemCleanableBytes == nil && model.systemError == nil) {
+                Text("Checking macOS’s purgeable-data service…").foregroundStyle(.secondary)
             } else if let error = model.systemError {
                 Text(error).font(.subheadline).foregroundStyle(.secondary)
-            } else { Text("Checking macOS’s purgeable-data service…").foregroundStyle(.secondary) }
+            } else if model.systemCleanableBytes == 0 {
+                Text("macOS reports no cache data available to clean right now.").foregroundStyle(.secondary)
+            }
             Text("Ask macOS to remove data apps marked discardable and eligible app-container caches. This action does not target cloud documents, Time Machine snapshots or system-update snapshots. Apps may rebuild or download cache data afterward.").font(.subheadline)
-            Text("Requests all eligible data, with no app-imposed size limit. macOS decides how much it can release.")
+            Text("macOS decides how much it can release. Scruffy measures the net change in free space, which includes other disk activity.")
                 .font(.caption).foregroundStyle(.secondary)
             Button("Clean purgeable data…") { acknowledge = false; confirmation = .system }
                 .buttonStyle(BrandButtonStyle()).disabled(!model.canCleanSystem)

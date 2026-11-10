@@ -1,7 +1,8 @@
 import XCTest
+import os
 @testable import CleanupCore
 
-final class PurgeableTests: XCTestCase {
+final class PurgeableTests: XCTestCase, @unchecked Sendable {
     func testCapacityEstimateIsOptionalAndNeverNegative() {
         XCTAssertNil(StorageCapacity(free: 50, available: nil, total: 100).reclaimableEstimate)
         XCTAssertEqual(StorageCapacity(free: 50, available: 40, total: 100).reclaimableEstimate, 0)
@@ -67,5 +68,44 @@ final class PurgeableTests: XCTestCase {
         XCTAssertThrowsError(try service.reclaim()) { error in
             XCTAssertTrue(error.localizedDescription.contains("cancelled"))
         }
+    }
+
+    func testMeasurementReportsNetFreeSpaceIndependentlyOfCommandReply() async throws {
+        for (after, expected) in [(140, 40), (100, 0), (90, -10)] as [(Int64, Int64)] {
+            let free = OSAllocatedUnfairLock(initialState: Int64(100))
+            let service = PurgeableStorage(capacity: {
+                StorageCapacity(free: free.withLock { $0 }, available: 500, total: 1000)
+            }, runner: { _, _ in throw PurgeableError.unsupportedCapacity })
+            let measurement = await service.measureReclaim(settle: .zero) {
+                free.withLock { $0 = after }
+                return Int64(400)
+            }
+            XCTAssertEqual(try measurement.result.get(), 400)
+            XCTAssertEqual(measurement.freeSpaceChange, expected)
+        }
+    }
+
+    func testMeasurementKeepsCommandErrorWhenCleanupPartiallySucceeds() async {
+        let free = OSAllocatedUnfairLock(initialState: Int64(100))
+        let service = PurgeableStorage(capacity: {
+            StorageCapacity(free: free.withLock { $0 }, available: nil, total: 1000)
+        }, runner: { _, _ in throw PurgeableError.unsupportedCapacity })
+        let measurement = await service.measureReclaim(settle: .zero) { () -> Void in
+            free.withLock { $0 = 125 }
+            throw PurgeableError.command("The second purge failed.")
+        }
+        XCTAssertThrowsError(try measurement.result.get())
+        XCTAssertEqual(measurement.freeSpaceChange, 25)
+    }
+
+    func testMissingBaselinePreventsCleanup() async {
+        let service = PurgeableStorage(capacity: { throw PurgeableError.unsupportedCapacity }, runner: { _, _ in
+            throw PurgeableError.unsupportedCapacity
+        })
+        let measurement = await service.measureReclaim(settle: .zero) {
+            XCTFail("Cleanup started without a free-space baseline")
+        }
+        XCTAssertThrowsError(try measurement.result.get())
+        XCTAssertNil(measurement.freeSpaceChange)
     }
 }

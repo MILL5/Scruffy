@@ -9,6 +9,7 @@ struct ScruffyApp: App {
     @StateObject private var model: AppModel
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
     @State private var showAbout = false
+    @State private var showSettings = false
     init() {
         SingleInstanceLock.enforce()
         _model = StateObject(wrappedValue: AppModel())
@@ -20,7 +21,7 @@ struct ScruffyApp: App {
     }
     var body: some Scene {
         WindowGroup("Scruffy") {
-            ContentView(model: model, showAbout: $showAbout)
+            ContentView(model: model, showAbout: $showAbout, showSettings: $showSettings)
                 .preferredColorScheme(Appearance(rawValue: appearance)?.colorScheme)
                 .frame(minWidth: min(720, launchSize.width), minHeight: min(540, launchSize.height))
                 .onAppear {
@@ -47,6 +48,9 @@ struct ScruffyApp: App {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(replacing: .appInfo) {
                 Button("About Scruffy") { showAbout = true }
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { showSettings = true }.keyboardShortcut(",", modifiers: .command).disabled(model.busy)
             }
         }
     }
@@ -110,7 +114,7 @@ struct ContentView: View {
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
     @Environment(\.colorScheme) private var colorScheme
     private var theme: ScruffyTheme { ScruffyTheme(scheme: colorScheme) }
-    @State private var showSettings = false
+    @Binding var showSettings: Bool
     @State private var showHistory = false
     @State private var showConfirmation = false
     @State private var preview: URL?
@@ -166,7 +170,11 @@ struct ContentView: View {
           }.frame(maxHeight: .infinity)
           if !model.cleanupJobs.isEmpty || model.cleanupHistoryError != nil {
               CleanupJobsView(jobs: model.cleanupJobs, historyError: model.cleanupHistoryError, availableSize: geometry.size,
-                              isExpanded: $cleanupJobsExpanded)
+                              isExpanded: $cleanupJobsExpanded, onUndo: { model.undoCleanup($0) },
+                              removable: model.removableJobs, onRemove: { model.removeCleanupJob($0) })
+                  .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                      model.refreshRestorableJobs()
+                  }
           }
           }
           .onAppear { windowSize = geometry.size }
@@ -177,6 +185,8 @@ struct ContentView: View {
         .background(BusyCursorRegion(isBusy: model.busy || purgeable.busy || videos.busy || model.isLoadingHistory
                                      || (showPurgeable && purgeable.refreshing)))
         .sheet(isPresented: $showSettings) { settings }
+        // Settings now opens from the app menu, which cannot see a running video compression.
+        .onChange(of: showSettings) { _, shown in if shown && (model.busy || videos.busy) { showSettings = false } }
         .sheet(isPresented: $showHistory) { history }
         .sheet(isPresented: $showConfirmation) { confirmation }
         .sheet(isPresented: $showAbout) { about }
@@ -207,6 +217,7 @@ struct ContentView: View {
                     showPurgeable = false; showVideos = false; model.activeCategory = nil
                 }
                 Text("REVIEW FILES").font(.system(size: 10, weight: .semibold)).tracking(1.8).foregroundStyle(.secondary).padding(.top, 22).padding(.bottom, 6)
+                    .padding(.leading, compact ? 8 : 12)
                 ForEach(CleanupCategory.allCases) { category in
                     navRow(category.rawValue, icon: category.symbol, selected: !showPurgeable && (category == .videos ? showVideos : (!showVideos && model.activeCategory == category)),
                            count: model.count(category), bytes: model.result == nil ? nil : model.bytes(category),
@@ -228,12 +239,7 @@ struct ContentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.border))
             VStack(alignment: .leading, spacing: 14) {
                 Button { showHistory = true } label: { Label("Recovery history", systemImage: "arrow.uturn.backward") }.buttonStyle(.plain).disabled(videos.busy)
-                Button { showSettings = true } label: { Label("Scan settings", systemImage: "slider.horizontal.3") }.buttonStyle(.plain).disabled(model.busy || videos.busy)
-                Button { showAbout = true } label: { Label("About Scruffy", systemImage: "info.circle") }.buttonStyle(.plain)
             }
-            Picker("Appearance", selection: $appearance) {
-                ForEach(Appearance.allCases) { mode in Text(mode.title).tag(mode.rawValue) }
-            }.pickerStyle(.menu).font(.caption)
             Text("LOCAL ONLY  ·  NO UPLOADS").font(.system(size: 9, weight: .medium)).tracking(1).foregroundStyle(.tertiary)
         }.padding(compact ? 14 : 22).frame(width: sidebarWidth).background(theme.sidebar)
             .overlay(alignment: .trailing) { Rectangle().fill(theme.border).frame(width: 1) }
@@ -256,19 +262,25 @@ struct ContentView: View {
                   Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular)).lineLimit(1).layoutPriority(1)
                   Spacer()
                   if let bytes {
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(formatBytes(bytes)).font(.caption.weight(.medium))
-                        Text("\(count.formatted()) files").font(.caption2)
-                    }.monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                    Text(formatBytes(bytes)).font(.caption.weight(.medium)).monospacedDigit().foregroundStyle(.secondary).fixedSize()
                   } else if count > 0 {
                     Text(count, format: .number).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                   }
                 }
             }
             if bytes != nil {
-                selectedCategoryLabel(count: selectedCount, bytes: selectedBytes).padding(.leading, 28)
+                // Second line shares the title's left edge and the size's right edge.
+                HStack(spacing: 6) {
+                    selectedCategoryLabel(count: selectedCount, bytes: selectedBytes)
+                    if !compact {
+                        Spacer(minLength: 4)
+                        Text("\(count.formatted()) files").font(.caption2).monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                    }
+                }.padding(.leading, 28)
             }
             }.padding(.horizontal, compact ? 8 : 12).padding(.vertical, bytes == nil ? 9 : 6)
+                // The whole row is the click target, including the empty space between its labels.
+                .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                 .foregroundStyle(selected ? theme.accent : theme.text.opacity(0.85))
                 .background(selected ? brandBlue.opacity(0.26) : .clear, in: RoundedRectangle(cornerRadius: 9))
                 .overlay { RoundedRectangle(cornerRadius: 9).stroke(selected ? theme.accent : .clear, lineWidth: 1.5) }
@@ -277,6 +289,9 @@ struct ContentView: View {
                 }
         }.buttonStyle(.plain).disabled(purgeable.busy || videos.busy)
             .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+    private func wholeGroup(_ item: Candidate) -> Bool {
+        item.duplicateHash.map(model.fullySelectedGroups.contains) == true
     }
     private func selectedCategoryLabel(count: Int, bytes: Int64) -> some View {
         Label("\(count.formatted()) selected · \(formatBytes(bytes))", systemImage: count > 0 ? "checkmark.circle.fill" : "circle")
@@ -406,33 +421,41 @@ struct ContentView: View {
             } else {
                 List(pageFiles) { item in
                     HStack(spacing: compact ? 8 : 12) {
-                        Toggle("Select \(item.url.lastPathComponent)", isOn: Binding(get: { model.selection.contains(item.id) }, set: { selected in
-                            model.setSelection(item, selected: selected)
-                        })).labelsHidden().toggleStyle(.checkbox).disabled(item.keeper || model.isQueued(item) || model.isFiltering)
-                        Button { model.toggleSelection(item) } label: {
+                        Toggle("Select \(item.url.lastPathComponent)", isOn: Binding(get: { model.selection.contains(item.id) }, set: { _ in
+                            model.advanceSelection(item, all: NSEvent.modifierFlags.contains(.control))
+                        })).labelsHidden().toggleStyle(.checkbox).disabled(model.isQueued(item) || model.isFiltering)
+                            .help(item.duplicateHash == nil ? "" : "Click again to add the next copy. Control-click chooses every copy and the original.")
+                        Button { model.advanceSelection(item, all: NSEvent.modifierFlags.contains(.control)) } label: {
                             HStack(spacing: compact ? 8 : 12) {
                                 CandidateFileIcon(path: item.id)
                                 VStack(alignment: .leading, spacing: 4) {
                                     HStack {
                                         Text(item.url.lastPathComponent).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
-                                        if item.keeper { Text("KEEP ORIGINAL").font(.system(size: 8, weight: .bold)).foregroundStyle(theme.accent).padding(4).background(brandBlue.opacity(0.1), in: Capsule()) }
+                                        if item.keeper && wholeGroup(item) { Text("ORIGINAL WILL BE REMOVED TOO").font(.system(size: 8, weight: .bold)).foregroundStyle(.orange).padding(4).background(Color.orange.opacity(0.15), in: Capsule()) }
+                                        else if item.keeper { Text("KEEP ORIGINAL").font(.system(size: 8, weight: .bold)).foregroundStyle(theme.accent).padding(4).background(brandBlue.opacity(0.1), in: Capsule()) }
                                         else if model.activeCategory == nil && !compact { Text(item.category.rawValue).font(.caption2).foregroundStyle(.tertiary) }
                                     }
                                     Text(item.url.deletingLastPathComponent().path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~"))
                                         .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                                     if let hash = item.duplicateHash {
-                                        Text("Match \(hash.prefix(8)) · \(model.result?.duplicateCounts[hash] ?? 0) identical copies")
-                                            .font(.system(size: 9)).foregroundStyle(theme.accent)
+                                        let copies = model.result?.duplicateCounts[hash] ?? 0
+                                        Text(wholeGroup(item) ? "Match \(hash.prefix(8)) · all \(copies) copies selected · none will be kept"
+                                                : "Match \(hash.prefix(8)) · \(copies) identical copies")
+                                            .font(.system(size: 9, weight: wholeGroup(item) ? .semibold : .regular))
+                                            .foregroundStyle(wholeGroup(item) ? Color.orange : theme.accent)
                                     }
                                 }.frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
                                 Spacer(minLength: 4)
                                 Text(formatBytes(item.bytes)).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(.secondary).fixedSize()
                             }
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 7).contentShape(Rectangle())
-                        }.buttonStyle(.plain).disabled(item.keeper || model.isQueued(item) || model.isFiltering)
+                        }.buttonStyle(.plain).disabled(model.isQueued(item) || model.isFiltering)
                         Button { preview = item.url } label: { Image(systemName: "eye") }.buttonStyle(.borderless).help("Quick Look")
                         Button { NSWorkspace.shared.activateFileViewerSelecting([item.url]) } label: { Image(systemName: "folder") }.buttonStyle(.borderless).help("Reveal in Finder")
-                    }.listRowBackground(model.selection.contains(item.id) ? theme.accent.opacity(0.12) : theme.card).contextMenu {
+                    }.listRowBackground(wholeGroup(item) ? Color.orange.opacity(0.14) : (model.selection.contains(item.id) ? theme.accent.opacity(0.12) : theme.card)).contextMenu {
+                        if let hash = item.duplicateHash {
+                            Button("Select all \(model.result?.duplicateCounts[hash] ?? 0) copies, including the original") { model.advanceSelection(item, all: true) }
+                        }
                         Button("Preview") { preview = item.url }
                         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
                         if let hash = item.duplicateHash, let keeper = model.result?.keepersByHash[hash] {
@@ -486,6 +509,7 @@ struct ContentView: View {
                     }
                     Text(model.isCleaning ? "Background cleanup is running. Each job reports its progress below." : model.status)
                         .font(.caption).foregroundStyle(.secondary).lineLimit(compact ? 2 : 3)
+                        .help(model.scanTimings.map { "Where the scan time went\n\($0.summary)" } ?? "")
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 Button { model.refreshRunningBrowsers(); showConfirmation = true } label: { Label("Review cleanup", systemImage: "trash") }
                     .buttonStyle(BrandButtonStyle()).controlSize(.large).fixedSize()
@@ -517,6 +541,9 @@ struct ContentView: View {
             Toggle("Browser caches (older than one day)", isOn: $model.options.browsers)
             Toggle("Developer caches (pip, uv, npm; older than seven days)", isOn: $model.options.caches)
             Toggle("User temporary files (older than seven days)", isOn: $model.options.temporary)
+            Picker("Appearance", selection: $appearance) {
+                ForEach(Appearance.allCases) { mode in Text(mode.title).tag(mode.rawValue) }
+            }.pickerStyle(.menu).fixedSize()
             Text("Close browsers before cleaning their caches. Close package managers and other active apps before cleaning developer caches or temporary files. Downloads and large files may be important—review every selection.").font(.caption).foregroundStyle(.secondary)
             HStack { Spacer(); Button("Done") { model.invalidate(); showSettings = false }.buttonStyle(BrandButtonStyle()) }
         }
@@ -544,6 +571,11 @@ struct ContentView: View {
                         if let message = model.browserQuitMessage { Text(message).foregroundStyle(.secondary) }
                     }.font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(6)
                 }
+            }
+            if !model.fullySelectedGroups.isEmpty {
+                let groups = model.fullySelectedGroups.count
+                Label("\(groups) duplicate \(groups == 1 ? "file has" : "files have") every copy selected, including the original. No copy will be kept.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.bold()).foregroundStyle(.orange)
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
@@ -592,7 +624,19 @@ struct ContentView: View {
             } else if model.history.isEmpty {
                 ContentUnavailableView("No cleanup history yet", systemImage: "arrow.uturn.backward").frame(height: 180)
             } else {
-                List(model.history) { record in
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search recovery history", text: $model.historyQuery).textFieldStyle(.plain)
+                    Text(model.historyQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                         ? "\(model.history.count.formatted()) files"
+                         : "\(model.visibleHistory.count.formatted()) of \(model.history.count.formatted()) files")
+                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                }.padding(8).background(theme.card, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border))
+                if model.visibleHistory.isEmpty {
+                    ContentUnavailableView.search(text: model.historyQuery).frame(height: min(320, max(150, windowSize.height * 0.38)))
+                } else {
+                List(model.visibleHistory) { record in
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(record.original.lastPathComponent).font(.subheadline.bold())
@@ -603,6 +647,7 @@ struct ContentView: View {
                         Button("Restore") { model.restore(record) }.disabled(model.busy || videos.busy || record.trashed == nil || !FileManager.default.fileExists(atPath: record.trashed!.path))
                     }.padding(.vertical, 5)
                 }.frame(height: min(320, max(150, windowSize.height * 0.38)))
+                }
             }
             HStack {
                 Button("Open Trash in Finder") { NSWorkspace.shared.open(model.scanner.home.appendingPathComponent(".Trash")) }

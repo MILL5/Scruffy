@@ -8,6 +8,35 @@ final class ProgressiveScannerTests: XCTestCase {
         var snapshots: [ScanResult] = []
         func add(_ result: ScanResult) { lock.lock(); snapshots.append(result); lock.unlock() }
     }
+    func testUnfinishedDownloadsAreNeverOfferedAndScanReportsTimings() throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("scruffy-pending-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        let downloads = home.appendingPathComponent("Downloads")
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        let old = Int(Date().timeIntervalSince1970) - 40 * 86400
+        for (index, name) in ["finished.zip", "Unconfirmed 1234.crdownload", "movie.MP4.PART", "setup.exe.partial"].enumerated() {
+            let url = downloads.appendingPathComponent(name)
+            try Data(repeating: UInt8(index), count: 100 + index).write(to: url)
+            var times = [timeval(tv_sec: old, tv_usec: 0), timeval(tv_sec: old, tv_usec: 0)]
+            XCTAssertEqual(utimes(url.path, &times), 0)
+        }
+        var options = ScanOptions(folders: [downloads]); options.browsers = false
+        let result = try CleanupScanner(home: home, temp: root.appendingPathComponent("temp")).scan(options)
+
+        XCTAssertEqual(result.files.map(\.url.lastPathComponent), ["finished.zip"])
+        XCTAssertTrue(result.videos.isEmpty)
+        XCTAssertTrue(result.notes.contains { $0.hasPrefix("Left out 3 unfinished downloads") }, "\(result.notes)")
+        XCTAssertTrue(CleanupScanner.isPendingDownload(URL(fileURLWithPath: "/a/Report.download/Report.pdf")))
+        XCTAssertFalse(CleanupScanner.isPendingDownload(URL(fileURLWithPath: "/a/downloads/partial results.txt")))
+
+        let timings = try XCTUnwrap(result.timings)
+        XCTAssertEqual(timings["Walk personal folders"]?.items, 1)
+        XCTAssertNotNil(timings["Walk: safety check"])
+        XCTAssertNotNil(timings["Walk: file metadata"])
+        XCTAssertNotNil(timings["Whole scan"])
+    }
     func testStatusOnlyProgressReusesSnapshotIdentity() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("scruffy-status-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }

@@ -1,12 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-swift build -c release
+# SCRUFFY_UNIVERSAL=1 builds for Apple silicon and Intel. SCRUFFY_SIGN_IDENTITY signs for distribution.
+if [[ "${SCRUFFY_UNIVERSAL:-0}" == 1 ]]; then
+    swift build -c release --arch arm64 --arch x86_64
+    BIN=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)
+else
+    swift build -c release
+    BIN=.build/release
+fi
 APP="${SCRUFFY_APP_PATH:-$PWD/dist/Scruffy.app}"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mkdir -p "$APP/Contents/Helpers"
-cp .build/release/Scruffy "$APP/Contents/MacOS/Scruffy"
-cp .build/release/ScruffyStorageHelper "$APP/Contents/Helpers/ScruffyStorageHelper"
+cp "$BIN/Scruffy" "$APP/Contents/MacOS/Scruffy"
+cp "$BIN/ScruffyStorageHelper" "$APP/Contents/Helpers/ScruffyStorageHelper"
 cp src/Scruffy/Resources/mill5-logo.png "$APP/Contents/Resources/mill5-logo.png"
 cp src/Scruffy/Resources/scruffy-broom.png "$APP/Contents/Resources/scruffy-broom.png"
 ICONSET="$PWD/dist/Scruffy.iconset"
@@ -28,8 +35,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>Scruffy</string>
 <key>CFBundleIconFile</key><string>ScruffyBright.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.4.0</string>
-<key>CFBundleVersion</key><string>6</string>
+<key>CFBundleShortVersionString</key><string>0.5.0</string>
+<key>CFBundleVersion</key><string>7</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSMultipleInstancesProhibited</key><true/>
 <key>NSHighResolutionCapable</key><true/>
@@ -38,6 +45,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>NSDesktopFolderUsageDescription</key><string>Scruffy scans folders you choose for duplicate and large files.</string>
 </dict></plist>
 PLIST
-codesign --force --sign - "$APP/Contents/Helpers/ScruffyStorageHelper"
-codesign --force --sign - "$APP"
+if [[ -n "${SCRUFFY_SIGN_IDENTITY:-}" ]]; then
+    SIGN=(--force --options runtime --timestamp --sign "$SCRUFFY_SIGN_IDENTITY")
+else
+    SIGN=(--force --sign -)
+fi
+codesign "${SIGN[@]}" "$APP/Contents/Helpers/ScruffyStorageHelper"
+codesign "${SIGN[@]}" "$APP"
 printf 'Built %s\n' "$APP"

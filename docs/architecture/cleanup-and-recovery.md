@@ -2,7 +2,7 @@
 
 Every selected file is checked before any move, then checked again immediately before its move to Trash. If a file changed or disappeared after scanning, it stays untouched and cleanup continues with other eligible selections. This applies to all file-cleanup categories. The final status reports moved files and skipped files once; skipped files leave the stale results and require a new scan before they can be selected again.
 
-A duplicate copy is skipped if its protected original is missing or changed. Duplicate contents are still verified with SHA-256, including changes that preserve the recorded fingerprint. Selecting a protected original, encountering a symlink, hard link, replaced volume or unsupported existing path remains a safety failure. These protections are not relaxed to increase the cleanup count. Actual Trash failures, recovery-history failures and browsers reopening still stop the remaining batch.
+A duplicate copy is skipped if its protected original is missing or changed. Duplicate contents are still verified with SHA-256, including changes that preserve the recorded fingerprint. Selecting a protected original without every other copy in its group, encountering a symlink, hard link, replaced volume or unsupported existing path remains a safety failure. These protections are not relaxed to increase the cleanup count. Actual Trash failures, recovery-history failures and browsers reopening still stop the remaining batch.
 
 ## Browser checks
 
@@ -27,3 +27,9 @@ The job panel stays available across sections, with compact rows and two columns
 A real error stops that job and leaves its reason and partial counts visible; other jobs continue independently. Changed/missing files still count as skips and do not fail the job. Workers never retry or resume automatically. Starting another job requires a fresh explicit selection and confirmation.
 
 `cleanup-jobs.json` stores private status metadata at job start and finish. It does not store runnable queues. On a later launch, any saved running job is shown as failed/interrupted, with its last saved progress and no attempt to resume. Progress saved at start can be zero even when some files reached Trash before interruption; the recovery journal remains the record of actual moves. Finished and failed job records remain visible. All workers share the same in-process recovery-journal state so concurrent appends do not replay the entire log for each file.
+
+## Whole duplicate groups, undo and job removal
+
+An original may be moved only when every other copy in its group is in the same batch. The batch moves the copies first and the original last. The interface reaches this state by repeated clicks on a duplicate's checkbox or a Control-click, and the confirmation sheet warns that no copy will be kept.
+
+Each record written during a job carries that job's id. Undo restores the job's records that are still in Trash through the ordinary restore path, so existing files are never replaced. It reports counts only: restored, already deleted, and not restored. Jobs run by earlier builds have no tagged records and report nothing left to restore. A finished job with no tagged file left in Trash can be removed from the job list; recovery history is unchanged.

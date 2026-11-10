@@ -324,4 +324,31 @@ final class CleanupJobsTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(model.result?.notes, finalSource.notes)
         model.result = nil
     }
+
+    func testJobCanBeRemovedOnlyWhenStoppedWithNothingLeftInTrash() {
+        var job = CleanupJob(category: .downloads, total: 2)
+        XCTAssertFalse(job.canRemove(restorable: []), "a running job stays")
+        job.finish(error: nil)
+        XCTAssertFalse(job.canRemove(restorable: [job.id]), "files still in Trash")
+        XCTAssertTrue(job.canRemove(restorable: []))
+    }
+    func testUndoSummaryIsNumbersOnlyAndOlderJobHistoryStillLoads() throws {
+        var undo = UndoOutcome(); undo.total = 1_219; undo.restored = 1_204; undo.missing = 12; undo.failed = 3
+        XCTAssertEqual(CleanupJob.undoSummary(undo), "Undone · 1,204 restored · 12 already deleted · 3 not restored")
+        undo.missing = 0; undo.failed = 0
+        XCTAssertEqual(CleanupJob.undoSummary(undo), "Undone · 1,204 restored")
+        XCTAssertEqual(CleanupJob.undoSummary(UndoOutcome()), "Undone · nothing left to restore")
+
+        var job = CleanupJob(category: .downloads, total: 5)
+        XCTAssertFalse(job.canUndo)
+        var outcome = CleanupOutcome(); outcome.count = 5
+        job.finish(outcome)
+        XCTAssertTrue(job.canUndo)
+        // A job saved before timings and undo existed has neither key.
+        var saved = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(job)) as? [String: Any])
+        saved.removeValue(forKey: "timings"); saved.removeValue(forKey: "undo")
+        let loaded = try JSONDecoder().decode(CleanupJob.self, from: JSONSerialization.data(withJSONObject: saved))
+        XCTAssertEqual(loaded.moved, 5)
+        XCTAssertNil(loaded.undo)
+    }
 }
