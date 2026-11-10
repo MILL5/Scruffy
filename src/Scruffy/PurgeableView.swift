@@ -164,7 +164,7 @@ struct PurgeableView: View {
                             Text("Requests all eligible snapshot space, with no app-imposed size limit. macOS decides which snapshots it can remove.").font(.caption).foregroundStyle(.secondary)
                         }
                         if report.protectedSnapshotCount > 0 {
-                            Text("\(report.protectedSnapshotCount) system-update snapshots are protected and excluded.").font(.caption).foregroundStyle(.secondary)
+                            Text("\(counted(report.protectedSnapshotCount, "system-update snapshot")) \(report.protectedSnapshotCount == 1 ? "is" : "are") protected and excluded.").font(.caption).foregroundStyle(.secondary)
                         }
                         Button("Review snapshot reclaim…") { acknowledge = false; confirmation = .snapshots }
                             .buttonStyle(BrandButtonStyle()).disabled(!model.canReclaimSnapshots)

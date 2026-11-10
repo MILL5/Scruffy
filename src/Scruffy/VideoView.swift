@@ -270,7 +270,7 @@ struct VideoView: View {
             Toggle("Select all", isOn: Binding(get: { model.allVisibleSelected }, set: { selected in model.setVisibleSelection(selected) }))
                 .toggleStyle(.checkbox).fixedSize().disabled(model.busy || model.isFiltering || model.visibleSelectableCount == 0)
                 .help("Select every matching video across all pages.")
-            Text("\(model.visible.count.formatted()) videos").font(.subheadline.bold()).lineLimit(1)
+            Text(counted(model.visible.count, "video")).font(.subheadline.bold()).lineLimit(1)
             if model.isFiltering { ProgressView().controlSize(.small) }
         }
     }
@@ -302,7 +302,7 @@ struct VideoView: View {
         HStack(spacing: compact ? 14 : 20) {
             Image(systemName: "film.stack").font(.system(size: compact ? 26 : 34, weight: .light)).foregroundStyle(theme.accent)
             VStack(alignment: .leading, spacing: 6) {
-                Text("\(model.files.count.formatted()) videos · \(formatBytes(model.totalBytes))")
+                Text("\(counted(model.files.count, "video")) · \(formatBytes(model.totalBytes))")
                     .font(.system(size: compact ? 20 : 24, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.8)
                 Text(compact ? "Verified smaller replacements; originals remain in Trash." : "Only a verified, smaller file replaces the original. Originals stay in Trash and use disk space until you empty it.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -347,7 +347,7 @@ struct VideoView: View {
             }
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(model.selection.isEmpty ? "Nothing selected" : "\(model.chosen.count.formatted()) videos · \(formatBytes(model.selectedBytes)) selected")
+                    Text(model.selection.isEmpty ? "Nothing selected" : "\(counted(model.chosen.count, "video")) · \(formatBytes(model.selectedBytes)) selected")
                         .font(.subheadline.bold()).lineLimit(1).minimumScaleFactor(0.85)
                     Text("High-quality HEVC encoding. Resolution and file type stay the same.").font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }.frame(maxWidth: .infinity, alignment: .leading)
@@ -364,7 +364,7 @@ struct VideoView: View {
       ResponsiveSheet(width: 600, idealHeight: 620, windowSize: paneSize) {
         VStack(alignment: .leading, spacing: 18) {
             Label("Compress selected videos?", systemImage: "film").font(.title2.bold())
-            Text("Compress \(model.chosen.count.formatted()) videos (\(formatBytes(model.selectedBytes))) using high-quality HEVC encoding.")
+            Text("Compress \(counted(model.chosen.count, "video")) (\(formatBytes(model.selectedBytes))) using high-quality HEVC encoding.")
             Text("Each video keeps its current resolution and file format. Scruffy verifies the compressed version and replaces the original only when it is smaller. The original moves to Trash and remains available for recovery. Space is released only when you empty Trash yourself.")
                 .font(.subheadline).foregroundStyle(.secondary)
             ScrollView {

@@ -511,7 +511,7 @@ struct ContentView: View {
                 }.padding(.horizontal, inset).padding(.top, 8)
             }
             if let notes = model.result?.notes, !notes.isEmpty {
-                DisclosureGroup("\(notes.count) locations or files could not be scanned") {
+                DisclosureGroup(notes.count == 1 ? "1 location or file could not be scanned" : "\(notes.count) locations or files could not be scanned") {
                     ScrollView { Text(notes.joined(separator: "\n")).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 85)
                 }.font(.system(size: 11)).padding(.horizontal, inset).padding(.vertical, 8)
             }
@@ -600,7 +600,7 @@ struct ContentView: View {
       ResponsiveSheet(width: 600, idealHeight: 640, windowSize: windowSize) {
         VStack(alignment: .leading, spacing: 18) {
             Label("One last look.", systemImage: "trash").font(.title2.bold())
-            Text("Move \(model.chosen.count) files (\(formatBytes(model.selectedBytes))) to Trash?")
+            Text("Move \(fileCount(model.chosen.count)) (\(formatBytes(model.selectedBytes))) to Trash?")
             Text("Each selected category starts a separate background job. Follow file counts below while reviewing other categories.").font(.subheadline).foregroundStyle(.secondary)
             Text("Nothing will be permanently deleted. Files in Downloads and large-file results may contain personal data. Confirm that you no longer need each selected item.").font(.subheadline).foregroundStyle(.secondary)
             if model.chosen.contains(where: { $0.category == .browsers }) {
@@ -675,8 +675,8 @@ struct ContentView: View {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Search recovery history", text: $model.historyQuery).textFieldStyle(.plain)
                     Text(model.historyQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                         ? "\(model.history.count.formatted()) files"
-                         : "\(model.visibleHistory.count.formatted()) of \(model.history.count.formatted()) files")
+                         ? fileCount(model.history.count)
+                         : "\(model.visibleHistory.count.formatted()) of \(fileCount(model.history.count))")
                         .font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 }.padding(8).background(theme.card, in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border))

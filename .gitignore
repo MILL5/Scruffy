@@ -3,3 +3,5 @@ dist/
 .DS_Store
 .swiftpm/
 output/
+# Per-user editor state: an Explorer show/hide toggle rewrites this file.
+.vscode/settings.json

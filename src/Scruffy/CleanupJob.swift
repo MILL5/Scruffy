@@ -34,18 +34,18 @@ struct CleanupJob: Identifiable, Codable, Sendable {
     }
     var status: String {
         switch state {
-        case .queued: "Queued · 0 of \(total.formatted()) files"
+        case .queued: "Queued · 0 of \(fileCount(total))"
         case .checking:
-            checked == total ? "Preparing recovery history · \(checked.formatted()) files checked"
+            checked == total ? "Preparing recovery history · \(fileCount(checked)) checked"
                 : "Checking file \(min(checked + 1, total).formatted()) of \(total.formatted())"
         case .moving:
             "Moving file \(min(processed + 1, total).formatted()) of \(total.formatted())"
         case .finishing:
-            "Updating results · \(processed.formatted()) of \(total.formatted()) files processed"
+            "Updating results · \(processed.formatted()) of \(fileCount(total)) processed"
         case .completed:
-            "Completed · \(processed.formatted()) of \(total.formatted()) files processed"
+            "Completed · \(processed.formatted()) of \(fileCount(total)) processed"
         case .failed:
-            "Failed · \(processed.formatted()) of \(total.formatted()) files processed"
+            "Failed · \(processed.formatted()) of \(fileCount(total)) processed"
         case .undoing:
             "Restoring \((undo?.processed ?? 0).formatted()) of \((undo?.total ?? 0).formatted())"
         case .undone:
