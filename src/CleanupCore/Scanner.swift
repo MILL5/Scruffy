@@ -435,7 +435,7 @@ public struct CleanupScanner: Sendable {
             let instant = Date()
             guard force || instant.timeIntervalSince(lastPublish) >= 1 else { return }
             lastPublish = instant
-            progress(snapshot(), "\(phase) · \(enumerated) files checked · \(ready.count) ready to review")
+            progress(snapshot(), "\(phase) · \(enumerated) \(enumerated == 1 ? "file" : "files") checked · \(ready.count) ready to review")
         }
         func walk(_ root: URL, category: CleanupCategory?, age: TimeInterval = 0) throws {
             guard fm.fileExists(atPath: root.path) else { return }

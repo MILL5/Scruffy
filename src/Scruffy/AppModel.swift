@@ -365,7 +365,7 @@ final class AppModel: ObservableObject {
                 await publish(found, final: true); hasScanned = true
                 scanTimings = found.timings
                 let took = found.timings?["Whole scan"].map { " · scan took \(PhaseTimings.format($0.seconds))" } ?? ""
-                if !isCleaning { status = "\(result?.categoryCounts.values.reduce(0, +) ?? 0) files ready to review across all categories · \(result?.videos.count ?? 0) videos available\(took)." }
+                if !isCleaning { status = "\(fileCount(result?.categoryCounts.values.reduce(0, +) ?? 0)) ready to review across all categories · \(counted(result?.videos.count ?? 0, "video")) available\(took)." }
             } catch is CancellationError { if scanGeneration == generation, !isCleaning { status = "Scan stopped. Ready results are still available." } }
             catch { if scanGeneration == generation { self.error = error.localizedDescription; status = "Scan could not finish." } }
             if scanGeneration == generation { isScanning = false }
@@ -596,9 +596,10 @@ final class AppModel: ObservableObject {
         }
     }
     func applyCleanupOutcome(_ outcome: CleanupOutcome, showErrors: Bool = true) async {
-        status = "\(outcome.count) files (\(formatBytes(outcome.bytes))) moved to Trash."
+        status = "\(fileCount(outcome.count)) (\(formatBytes(outcome.bytes))) moved to Trash."
         if !outcome.skippedIDs.isEmpty {
-            status += " \(outcome.skippedIDs.count) changed or missing files left untouched. Scan again to review them."
+            let one = outcome.skippedIDs.count == 1
+            status += " \(outcome.skippedIDs.count) changed or missing \(one ? "file" : "files") left untouched. Scan again to review \(one ? "it" : "them")."
         }
         status += " Space is released only after you empty Trash."
         if showErrors { error = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "\n") }
@@ -660,7 +661,11 @@ final class RunningBrowserMonitor: @unchecked Sendable {
     }
 }
 
-func fileCount(_ count: Int) -> String { "\(count.formatted()) \(count == 1 ? "file" : "files")" }
+/// "1 file", "2 files": a count with its noun in the right number.
+func counted(_ count: Int, _ singular: String, _ plural: String? = nil) -> String {
+    "\(count.formatted()) \(count == 1 ? singular : plural ?? singular + "s")"
+}
+func fileCount(_ count: Int) -> String { counted(count, "file") }
 
 func formatBytes(_ bytes: Int64) -> String {
     let formatter = ByteCountFormatter()
