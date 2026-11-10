@@ -2,7 +2,7 @@
 
 A native, local-only Mac cleanup app. Requires a Mac with Apple silicon running the current macOS or the one before it (macOS 26 or later today).
 
-[Project website](https://mill5.github.io/Scruffy/) · [Documentation](docs/README.md)
+[Download the latest release](https://github.com/MILL5/Scruffy/releases/latest/download/Scruffy.dmg) · [Project website](https://mill5.github.io/Scruffy/) · [Documentation](docs/README.md)
 
 ## Run
 
