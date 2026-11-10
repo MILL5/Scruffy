@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct StorageCapacity: Sendable {
@@ -9,13 +10,6 @@ public struct StorageCapacity: Sendable {
     public init(free: Int64, available: Int64?, total: Int64) {
         self.free = max(0, free); self.available = available; self.total = max(0, total)
     }
-}
-
-public enum ReclaimTarget: Int64, CaseIterable, Sendable, Identifiable {
-    case one = 1, five = 5, ten = 10, twenty = 20
-    public var id: Int64 { rawValue }
-    public var bytes: Int64 { rawValue * 1_000_000_000 }
-    public var title: String { "\(rawValue) GB" }
 }
 
 public struct StorageReport: Sendable {
@@ -44,7 +38,13 @@ public enum PurgeableError: LocalizedError {
 public struct PurgeableStorage: Sendable {
     public typealias Runner = @Sendable (String, [String]) throws -> SystemCommandResult
     private let runner: Runner
-    public init(runner: @escaping Runner = PurgeableStorage.run) { self.runner = runner }
+    private let capacityReader: @Sendable () throws -> StorageCapacity
+    public init(runner: @escaping Runner = PurgeableStorage.run) {
+        self.runner = runner; capacityReader = { try PurgeableStorage.capacity() }
+    }
+    init(capacity: @escaping @Sendable () throws -> StorageCapacity, runner: @escaping Runner) {
+        self.runner = runner; capacityReader = capacity
+    }
 
     public static func run(_ executable: String, _ arguments: [String]) throws -> SystemCommandResult {
         let process = Process()
@@ -62,29 +62,52 @@ public struct PurgeableStorage: Sendable {
             $0.range(of: #"^com\.apple\.TimeMachine\.\d{4}-\d{2}-\d{2}-\d{6}\.local$"#, options: .regularExpression) != nil
         }.sorted()
     }
-    public static func capacity(at url: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> StorageCapacity {
-        let values = try url.resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey])
-        guard let free = values.volumeAvailableCapacity, let total = values.volumeTotalCapacity else { throw PurgeableError.unsupportedCapacity }
-        return StorageCapacity(free: Int64(free), available: values.volumeAvailableCapacityForImportantUsage, total: Int64(total))
+    public static func capacity(at url: URL = URL(fileURLWithPath: SystemPurgePolicy.volume)) throws -> StorageCapacity {
+        var info = statfs()
+        guard statfs(url.path, &info) == 0, info.f_bsize > 0 else { throw PurgeableError.unsupportedCapacity }
+        let blockSize = UInt64(info.f_bsize)
+        let freeBytes = blockSize.multipliedReportingOverflow(by: info.f_bavail)
+        let totalBytes = blockSize.multipliedReportingOverflow(by: info.f_blocks)
+        guard !freeBytes.overflow, !totalBytes.overflow,
+              let free = Int64(exactly: freeBytes.partialValue), let total = Int64(exactly: totalBytes.partialValue) else {
+            throw PurgeableError.unsupportedCapacity
+        }
+        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return StorageCapacity(free: free, available: values?.volumeAvailableCapacityForImportantUsage, total: total)
+    }
+    public func measureReclaim<Output: Sendable>(settle: Duration = .seconds(3), _ operation: @Sendable () throws -> Output) async
+        -> (result: Result<Output, Error>, freeSpaceChange: Int64?) {
+        let before: Int64
+        do { before = try capacityReader().free }
+        catch { return (.failure(error), nil) }
+
+        let result = Result(catching: operation)
+        // Accounting can lag the command. Measure failed requests too, since cleanup can be partial.
+        try? await Task.sleep(for: settle)
+        let after = try? capacityReader().free
+        return (result, after.map { $0 - before })
     }
     public func report() throws -> StorageReport {
-        let capacity = try Self.capacity()
+        let capacity = try capacityReader()
         let listing = try runner("/usr/bin/tmutil", ["listlocalsnapshots", "/"])
         guard listing.status == 0 else { throw PurgeableError.command(listing.output) }
         let protectedCount = listing.output.split(whereSeparator: \.isNewline).filter { $0.hasPrefix("com.apple.os.update-") }.count
         return StorageReport(capacity: capacity, snapshots: Self.snapshotNames(in: listing.output), protectedSnapshotCount: protectedCount)
     }
-    public static func reclaimScript(target: ReclaimTarget) -> String {
-        // Only enum-derived integers and fixed paths enter the shell. No filename, UI
+    public static func reclaimScript(requesting bytes: Int64) throws -> String {
+        guard bytes > 0 else { throw PurgeableError.unsupportedCapacity }
+        // Only a trusted capacity-derived integer and fixed paths enter the shell. No filename, UI
         // string, snapshot name, or process output is interpolated into this command.
-        "do shell script \"/usr/bin/tmutil thinlocalsnapshots / \(target.bytes) 1\" with administrator privileges"
+        return "do shell script \"/usr/bin/tmutil thinlocalsnapshots / \(bytes) 1\" with administrator privileges"
     }
-    public func reclaim(target: ReclaimTarget) throws {
+    public func reclaim() throws {
         // Refresh eligibility immediately before requesting admin approval.
         let listing = try runner("/usr/bin/tmutil", ["listlocalsnapshots", "/"])
         guard listing.status == 0 else { throw PurgeableError.command(listing.output) }
         guard !Self.snapshotNames(in: listing.output).isEmpty else { throw PurgeableError.noSnapshots }
-        let result = try runner("/usr/bin/osascript", ["-e", Self.reclaimScript(target: target)])
+        // The full volume size asks for all eligible snapshot space, without an app-imposed GB cap.
+        let bytes = try capacityReader().total
+        let result = try runner("/usr/bin/osascript", ["-e", Self.reclaimScript(requesting: bytes)])
         guard result.status == 0 else {
             throw PurgeableError.command(result.output.contains("-128") ? "Reclaim cancelled. No completion was reported." : result.output)
         }

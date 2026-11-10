@@ -110,7 +110,7 @@ final class AppModelSelectionTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testBulkSelectionDoesNotChangeDuringCleanup() async {
+    func testBulkSelectionRemainsAvailableDuringOtherCleanup() async {
         let model = AppModel()
         let first = candidate("first", category: .downloads)
         let second = candidate("second", category: .downloads)
@@ -119,11 +119,52 @@ final class AppModelSelectionTests: XCTestCase, @unchecked Sendable {
         model.isCleaning = true
 
         model.setVisibleSelection(true)
-        XCTAssertEqual(model.selection, [first.id])
+        XCTAssertEqual(model.selection, [first.id, second.id])
         model.setVisibleSelection(false)
-        XCTAssertEqual(model.selection, [first.id])
-        XCTAssertEqual(model.chosen.map(\.id), [first.id])
-        XCTAssertEqual(model.selectedBytes, first.bytes)
+        XCTAssertTrue(model.selection.isEmpty)
+        XCTAssertTrue(model.chosen.isEmpty)
+        XCTAssertEqual(model.selectedBytes, 0)
+    }
+
+    @MainActor
+    func testCategorySwitchShowsItsOwnRowsImmediatelyWithoutFiltering() async {
+        let model = AppModel(loadHistory: false)
+        let browser = candidate("browser", category: .browsers, bytes: 5)
+        let small = candidate("small", category: .downloads, bytes: 10)
+        let big = candidate("big", category: .downloads, bytes: 30)
+        model.result = ScanResult(files: [small, browser, big], notes: [])
+
+        model.activeCategory = .downloads
+        XCTAssertFalse(model.isFiltering)
+        XCTAssertEqual(model.visible.map(\.id), [big.id, small.id])
+        model.activeCategory = .browsers
+        XCTAssertFalse(model.isFiltering)
+        XCTAssertEqual(model.visible.map(\.id), [browser.id])
+        model.activeCategory = .large
+        XCTAssertFalse(model.isFiltering)
+        XCTAssertTrue(model.visible.isEmpty)
+        model.activeCategory = nil
+        XCTAssertEqual(model.visible.map(\.id), [big.id, small.id, browser.id])
+    }
+
+    @MainActor
+    func testPendingSearchInAnotherCategoryNeverShowsPreviousCategoryRows() async {
+        let model = AppModel(loadHistory: false)
+        let browser = candidate("browser", category: .browsers)
+        let download = candidate("download", category: .downloads)
+        model.result = ScanResult(files: [browser, download], notes: [])
+        model.activeCategory = .browsers
+        model.query = "browser"
+        await waitForVisible(model, ids: [browser.id])
+
+        // Downloads has no saved search, so its rows appear at once.
+        model.activeCategory = .downloads
+        XCTAssertEqual(model.visible.map(\.id), [download.id])
+        // Browser caches restores its saved search: rows clear until that search finishes.
+        model.activeCategory = .browsers
+        XCTAssertTrue(model.isFiltering)
+        XCTAssertTrue(model.visible.isEmpty)
+        await waitForVisible(model, ids: [browser.id])
     }
 
     @MainActor
@@ -134,6 +175,7 @@ final class AppModelSelectionTests: XCTestCase, @unchecked Sendable {
         model.result = ScanResult(files: [browser, download], notes: [])
         model.selection = [download.id]
         model.activeCategory = .browsers
+        model.query = "browser"
         XCTAssertTrue(model.isFiltering)
 
         model.setVisibleSelection(true)
@@ -148,40 +190,56 @@ final class AppModelSelectionTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testRowToggleSelectsAndDeselectsButNeverSelectsKeeper() async {
-        let model = AppModel()
-        let copy = candidate("copy", category: .duplicates, bytes: 20, hash: "group")
+    func testRepeatedClicksAddOneDuplicateAtATimeOriginalLastThenClear() async {
+        let model = AppModel(loadHistory: false)
+        let first = candidate("copy-a", category: .duplicates, bytes: 20, hash: "group")
+        let second = candidate("copy-b", category: .duplicates, bytes: 20, hash: "group")
         let keeper = candidate("original", category: .duplicates, bytes: 20, hash: "group", keeper: true)
-        model.result = ScanResult(files: [keeper, copy], notes: [])
+        let other = candidate("other-copy", category: .duplicates, bytes: 5, hash: "other")
+        let otherKeeper = candidate("other-original", category: .duplicates, bytes: 5, hash: "other", keeper: true)
+        model.result = ScanResult(files: [keeper, first, second, other, otherKeeper], notes: [])
 
-        model.toggleSelection(copy)
-        XCTAssertEqual(model.selection, [copy.id])
-        XCTAssertEqual(model.chosen.map(\.id), [copy.id])
-        XCTAssertEqual(model.selectedBytes, 20)
+        // Clicking the original's row never picks the original while a copy is still unselected.
+        model.advanceSelection(keeper)
+        XCTAssertEqual(model.selection, [first.id])
+        model.advanceSelection(second)
+        XCTAssertEqual(model.selection, [first.id, second.id])
+        XCTAssertTrue(model.fullySelectedGroups.isEmpty)
+        XCTAssertEqual(model.selectedBytes, 40)
 
-        model.toggleSelection(copy)
+        model.advanceSelection(second)
+        XCTAssertEqual(model.selection, [first.id, second.id, keeper.id])
+        XCTAssertEqual(model.fullySelectedGroups, ["group"])
+        XCTAssertEqual(Set(model.chosen.map(\.id)), [first.id, second.id, keeper.id])
+        XCTAssertEqual(model.selectedBytes, 60)
+
+        model.advanceSelection(first)
+        XCTAssertTrue(model.selection.isEmpty)
+        XCTAssertTrue(model.fullySelectedGroups.isEmpty)
+
+        // Control-click chooses the whole group at once and leaves other groups alone.
+        model.advanceSelection(first, all: true)
+        XCTAssertEqual(model.selection, [first.id, second.id, keeper.id])
+        XCTAssertEqual(model.fullySelectedGroups, ["group"])
+
+        // Select all never adds an original; clearing releases a chosen one.
+        model.setVisibleSelection(true)
+        XCTAssertFalse(model.selection.contains(otherKeeper.id))
+        XCTAssertEqual(model.fullySelectedGroups, ["group"])
+        model.setVisibleSelection(false)
         XCTAssertTrue(model.selection.isEmpty)
         XCTAssertTrue(model.chosen.isEmpty)
-        XCTAssertEqual(model.selectedBytes, 0)
-
-        model.toggleSelection(keeper)
-        XCTAssertTrue(model.selection.isEmpty)
     }
 
     @MainActor
-    func testRowToggleDoesNotChangeSelectionDuringCleanupOrFiltering() async {
+    func testRowToggleWaitsForFiltering() async {
         let model = AppModel()
         let browser = candidate("browser", category: .browsers)
         let download = candidate("download", category: .downloads)
         model.result = ScanResult(files: [browser, download], notes: [])
         model.toggleSelection(download)
-        model.isCleaning = true
-        model.toggleSelection(download)
-        model.toggleSelection(browser)
-        XCTAssertEqual(model.selection, [download.id])
-
-        model.isCleaning = false
         model.activeCategory = .browsers
+        model.query = "browser"
         XCTAssertTrue(model.isFiltering)
         model.toggleSelection(download)
         model.toggleSelection(browser)

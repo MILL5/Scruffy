@@ -9,6 +9,12 @@ typealias Query = @convention(c) (CFDictionary) -> Unmanaged<CFTypeRef>?
 typealias ReplyBlock = @convention(block) (CFDictionary?) -> Void
 typealias Purge = @convention(c) (CFDictionary, ReplyBlock) -> Unmanaged<CFTypeRef>?
 
+func sumBytes(_ left: Int64, _ right: Int64) throws -> Int64 {
+    let (total, overflow) = left.addingReportingOverflow(right)
+    guard !overflow else { throw PurgeableError.unsupportedCapacity }
+    return total
+}
+
 final class ReplyBox: @unchecked Sendable {
     let done = DispatchSemaphore(value: 0)
     private let lock = NSLock()
@@ -19,7 +25,7 @@ final class ReplyBox: @unchecked Sendable {
 
 do {
     let args = Array(CommandLine.arguments.dropFirst())
-    guard args == ["probe"] || (args.count == 2 && args[0] == "purge" && Int64(args[1]).flatMap(ReclaimTarget.init(rawValue:)) != nil) else {
+    guard args == ["probe"] || args == ["purge"] else {
         throw PurgeableError.command("Unsupported storage-helper request.")
     }
     alarm(args[0] == "probe" ? 45 : 240)
@@ -28,28 +34,47 @@ do {
           let purgeSymbol = dlsym(handle, "CacheDeletePurgeSpaceWithInfoSync") else {
         throw PurgeableError.command("This macOS version does not provide the required purge service.")
     }
+    let deadline = DispatchTime.now() + .seconds(210)
     let query = unsafeBitCast(querySymbol, to: Query.self)
-    guard let raw = query(SystemPurgePolicy.queryInfo() as CFDictionary)?.takeRetainedValue() as? [String: Any] else {
-        throw PurgeableError.command("macOS could not inspect purgeable system data.")
+    func eligibleBytes(for service: SystemPurgePolicy.Service) throws -> Int64 {
+        let info = SystemPurgePolicy.queryInfo(for: service) as CFDictionary
+        guard let raw = query(info)?.takeRetainedValue() as? [String: Any] else {
+            throw PurgeableError.command("macOS could not inspect purgeable system data.")
+        }
+        return try SystemPurgePolicy.verifiedBytes(raw, for: service)
     }
-    let bytes = try SystemPurgePolicy.verifiedBytes(raw)
+    let fileData = try eligibleBytes(for: .fileData)
+    let appCaches = try eligibleBytes(for: .appContainerCaches)
+    let bytes = try sumBytes(fileData, appCaches)
     var removed: Int64?
     if args[0] == "purge" {
-        guard bytes > 0, let target = Int64(args[1]).flatMap(ReclaimTarget.init(rawValue:)) else {
+        guard bytes > 0 else {
             throw PurgeableError.command("macOS currently reports no cleanable system data. Nothing was removed.")
         }
-        let box = ReplyBox()
-        let callback: ReplyBlock = { dictionary in box.set(dictionary as? [String: Any]) }
         let purge = unsafeBitCast(purgeSymbol, to: Purge.self)
-        _ = purge(SystemPurgePolicy.purgeInfo(target: target) as CFDictionary, callback)?.takeRetainedValue()
-        guard box.done.wait(timeout: .now() + 210) == .success, let result = box.get() else {
-            throw PurgeableError.command("macOS did not report completion. Refresh storage before retrying; the request may still finish.")
+        func clean(_ service: SystemPurgePolicy.Service, bytes: Int64) throws -> Int64 {
+            guard bytes > 0 else { return 0 }
+            guard DispatchTime.now() < deadline else { throw PurgeableError.command("The macOS purge request timed out.") }
+            let box = ReplyBox()
+            let callback: ReplyBlock = { dictionary in box.set(dictionary as? [String: Any]) }
+            let info = try SystemPurgePolicy.purgeInfo(for: service, cleanableBytes: bytes) as CFDictionary
+            _ = purge(info, callback)?.takeRetainedValue()
+            guard box.done.wait(timeout: deadline) == .success, let result = box.get() else {
+                throw PurgeableError.command("macOS did not report completion. Refresh storage before retrying; the request may still finish.")
+            }
+            if let error = result["CACHE_DELETE_ERROR"] { throw PurgeableError.command("macOS purge failed: \(error)") }
+            guard let amount = SystemPurgePolicy.byteCount(result["CACHE_DELETE_AMOUNT"]) else {
+                throw PurgeableError.command("macOS did not report the amount removed. Refresh storage to check the result.")
+            }
+            return amount
         }
-        if let error = result["CACHE_DELETE_ERROR"] { throw PurgeableError.command("macOS purge failed: \(error)") }
-        guard let amount = result["CACHE_DELETE_AMOUNT"] as? NSNumber, amount.int64Value >= 0 else {
-            throw PurgeableError.command("macOS did not report the amount removed. Refresh storage to check the result.")
+        var fileBytesRemoved = try clean(.fileData, bytes: fileData)
+        if fileBytesRemoved > 0 {
+            // A successful first pass can leave more purgeable file data. Check once at the same urgency.
+            let remaining = try eligibleBytes(for: .fileData)
+            fileBytesRemoved = try sumBytes(fileBytesRemoved, clean(.fileData, bytes: remaining))
         }
-        removed = amount.int64Value
+        removed = try sumBytes(fileBytesRemoved, clean(.appContainerCaches, bytes: appCaches))
     }
     let reply = SystemPurgeReply(cleanableBytes: bytes, removedBytes: removed)
     FileHandle.standardOutput.write(try JSONEncoder().encode(reply))

@@ -334,6 +334,33 @@ final class BrowserCacheCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try service.records().map(\.original), [unchanged.url])
     }
 
+    func testWholeDuplicateGroupCanBeRemovedWithOriginalMovedLast() async throws {
+        let group = try duplicateGroup("whole-group", copies: 3)
+        let all = [group.keeper] + group.copies
+        let service = TrashService(scanner: scanner, journal: root.appendingPathComponent("whole-group-journal.json"))
+        let moves = Moves()
+        let outcome = try await service.clean(all, all: all, folders: [downloads], browsersRunning: { false },
+                                              moveToTrash: { moves.add($0); return $0 })
+        XCTAssertTrue(outcome.errors.isEmpty, "\(outcome.errors)")
+        XCTAssertEqual(outcome.count, 4)
+        XCTAssertEqual(moves.sources.last, group.keeper.url)
+        XCTAssertEqual(Set(moves.sources), Set(all.map(\.url)))
+    }
+
+    func testOriginalStaysProtectedWhenAnyCopyIsLeftOut() async throws {
+        let group = try duplicateGroup("partial-group", copies: 3)
+        let all = [group.keeper] + group.copies
+        let service = TrashService(scanner: scanner, journal: root.appendingPathComponent("partial-group-journal.json"))
+        let moves = Moves()
+        do {
+            _ = try await service.clean([group.keeper] + group.copies.dropLast(), all: all, folders: [downloads],
+                                        browsersRunning: { false }, moveToTrash: { moves.add($0); return $0 })
+            XCTFail("An original must not move while one of its copies is unselected")
+        } catch { }
+        XCTAssertTrue(moves.sources.isEmpty)
+        XCTAssertTrue(all.allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) })
+    }
+
     func testExplicitlySelectedDuplicateKeeperStillAbortsBeforeAnyMove() async throws {
         let group = try duplicateGroup("protected-keeper")
         let independent = try personal("independent.txt")

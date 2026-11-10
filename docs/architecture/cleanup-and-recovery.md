@@ -2,7 +2,7 @@
 
 Every selected file is checked before any move, then checked again immediately before its move to Trash. If a file changed or disappeared after scanning, it stays untouched and cleanup continues with other eligible selections. This applies to all file-cleanup categories. The final status reports moved files and skipped files once; skipped files leave the stale results and require a new scan before they can be selected again.
 
-A duplicate copy is skipped if its protected original is missing or changed. Duplicate contents are still verified with SHA-256, including changes that preserve the recorded fingerprint. Selecting a protected original, encountering a symlink, hard link, replaced volume or unsupported existing path remains a safety failure. These protections are not relaxed to increase the cleanup count. Actual Trash failures, recovery-history failures and browsers reopening still stop the remaining batch.
+A duplicate copy is skipped if its protected original is missing or changed. Duplicate contents are still verified with SHA-256, including changes that preserve the recorded fingerprint. Selecting a protected original without every other copy in its group, encountering a symlink, hard link, replaced volume or unsupported existing path remains a safety failure. These protections are not relaxed to increase the cleanup count. Actual Trash failures, recovery-history failures and browsers reopening still stop the remaining batch.
 
 ## Browser checks
 
@@ -17,3 +17,19 @@ Existing `trash-history.json` remains readable and unchanged. New operations app
 Each event appends constant-size data instead of rewriting all prior records twice per file. A cleanup batch validates history once and reuses that journal instance; unexpected external modifications trigger revalidation. Appending uses an exclusive file lock, single-link regular-file/owner checks, mode 0600 and `fsync`. Only an unterminated final fragment from an interrupted write may be ignored and truncated; a malformed committed event stops cleanup. Recovery history loads off the UI thread.
 
 Trash and the journal cannot form a single atomic filesystem transaction. If the post-move record fails, the app reports that Finder's Trash is needed and stops. Restoring refuses to overwrite an occupied original path. Neither cleanup nor restore empties Trash. The event log grows with operations; automatic compaction or pruning is not implemented.
+
+## Background cleanup jobs
+
+Confirming file cleanup creates one named background job per selected category. Each job captures its own file list, folder permissions and protected-original snapshot. Other categories remain selectable while it runs. Queued files and their category cannot be submitted to another active job. Starting new scans, video replacement and system-purge mutations stay blocked while Trash jobs run to prevent conflicting operations; an existing progressive scan can continue.
+
+The job panel stays available across sections, with compact rows and two columns when the window is at least 680 points wide. Every job reports its checking or moving phase, file number and total, moved/skipped counts and elapsed time. Its details show the current filename, logical bytes, start time and full failure reason. The panel can be collapsed; starting another job expands it. In compact windows the chart gives way to the expanded job panel so file rows stay usable. Updates are coalesced to five per second per job, with forced phase/final updates. Result pruning and rebuilding happen off the main actor; an explicit finishing phase remains visible until the updated results are ready. Cleanup rebuilds use the latest unfiltered scan source so finishing a job cannot discard newly discovered files. Generation checks prevent old rebuilds from replacing newer results. Foundation temporaries are drained per file and per decoded journal event rather than retained across a large queue.
+
+A real error stops that job and leaves its reason and partial counts visible; other jobs continue independently. Changed/missing files still count as skips and do not fail the job. Workers never retry or resume automatically. Starting another job requires a fresh explicit selection and confirmation.
+
+`cleanup-jobs.json` stores private status metadata at job start and finish. It does not store runnable queues. On a later launch, any saved running job is shown as failed/interrupted, with its last saved progress and no attempt to resume. Progress saved at start can be zero even when some files reached Trash before interruption; the recovery journal remains the record of actual moves. Finished and failed job records remain visible. All workers share the same in-process recovery-journal state so concurrent appends do not replay the entire log for each file.
+
+## Whole duplicate groups, undo and job removal
+
+An original may be moved only when every other copy in its group is in the same batch. The batch moves the copies first and the original last. The interface reaches this state by repeated clicks on a duplicate's checkbox or a Control-click, and the confirmation sheet warns that no copy will be kept.
+
+Each record written during a job carries that job's id. Undo restores the job's records that are still in Trash through the ordinary restore path, so existing files are never replaced. It reports counts only: restored, already deleted, and not restored. Jobs run by earlier builds have no tagged records and report nothing left to restore. A finished job with no tagged file left in Trash can be removed from the job list; recovery history is unchanged.
