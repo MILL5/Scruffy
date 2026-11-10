@@ -2,7 +2,7 @@
 
 > Scruffy is a native Mac cleanup app for Apple silicon Macs running macOS 26 or later. It finds duplicate files, old downloads, large files, videos and caches, lets the user review every file, moves the chosen files to macOS Trash, and can undo a cleanup. Everything runs locally: no account, no analytics, no uploads.
 
-Scruffy is in development. No public download is offered yet. It is built by Richard (Rich) Crane as part of Inventing Fire with AI, with MILL5.
+Download the latest signed and notarized disk image at https://github.com/MILL5/Scruffy/releases/latest/download/Scruffy.dmg. It is built by Richard (Rich) Crane as part of Inventing Fire with AI, with MILL5.
 
 ## What it does
 
@@ -47,7 +47,7 @@ Known cloud-sync folders, symlinks, hard links, app bundles, photo libraries, se
 
 ### Can I download Scruffy?
 
-Not yet. Scruffy is in development and this page does not offer a public download. Follow progress at Inventing Fire with AI.
+Yes. Download the latest disk image at https://github.com/MILL5/Scruffy/releases/latest/download/Scruffy.dmg, open it and drag Scruffy to Applications. It is signed and notarized by Apple and needs an Apple silicon Mac running macOS 26 or later.
 
 ## Links
 
