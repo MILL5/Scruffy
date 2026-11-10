@@ -7,6 +7,20 @@ public struct TrashRecord: Codable, Identifiable, Sendable {
     public var trashed: URL?
     public let fingerprint: Fingerprint
     public let date: Date
+    /// The cleanup job that moved this file. Optional so earlier journals still load.
+    public var job: UUID? = nil
+}
+
+/// Counts from undoing one cleanup job. Best effort: files already gone from Trash stay gone.
+public struct UndoOutcome: Sendable, Codable, Equatable {
+    public var total = 0
+    public var restored = 0
+    /// No longer in Trash, for example because Trash was emptied.
+    public var missing = 0
+    /// Still in Trash but not put back: the original place is taken or its folder is gone.
+    public var failed = 0
+    public var processed: Int { restored + missing + failed }
+    public init() {}
 }
 
 public struct CleanupOutcome: Sendable {
@@ -15,6 +29,8 @@ public struct CleanupOutcome: Sendable {
     public var errors: [String] = []
     public var movedIDs: [String] = []
     public var skippedIDs: [String] = []
+    /// Where the time went. Measurement only.
+    public var timings = PhaseTimings()
 }
 
 public struct CleanupProgress: Sendable {
@@ -44,6 +60,28 @@ public struct TrashService: Sendable {
     }
     public func records() throws -> [TrashRecord] {
         try history.records()
+    }
+    /// Set around a cleanup so every file it moves is recorded against that job.
+    @TaskLocal public static var cleanupJob: UUID?
+
+    /// Puts back every file the job moved that is still in Trash. Never replaces an existing file.
+    public func undo(job: UUID, progress: (@Sendable (UndoOutcome) -> Void)? = nil) throws -> UndoOutcome {
+        let moved = try history.records().filter { $0.job == job }
+        var outcome = UndoOutcome()
+        outcome.total = moved.count
+        var lastReport = ContinuousClock.now
+        for record in moved {
+            try Task.checkCancellation()
+            if let trashed = record.trashed, FileManager.default.fileExists(atPath: trashed.path) {
+                do { try autoreleasepool { try restore(record) }; outcome.restored += 1 }
+                catch { outcome.failed += 1 }
+            } else { outcome.missing += 1 }
+            if let progress, lastReport.duration(to: .now) >= .milliseconds(200) {
+                lastReport = .now; progress(outcome)
+            }
+        }
+        progress?(outcome)
+        return outcome
     }
     private func staleFile(_ item: Candidate, all: [Candidate], error: Error) -> Bool {
         guard let safety = error as? SafetyError else { return false }
@@ -75,7 +113,29 @@ public struct TrashService: Sendable {
                           guard let result else { throw SafetyError.unsafe("Trash location unavailable") }
                           return result as URL
                       }) async throws -> CleanupOutcome {
+        // An original may go only when every file of its duplicate group is in this batch.
+        // Originals move last, so each copy is still verified against its original first.
+        let batch = Set(selected.map(\.id))
+        var incomplete = Set<String>()
+        for item in all { if let hash = item.duplicateHash, !batch.contains(item.id) { incomplete.insert(hash) } }
+        // A lone original is never a whole group: at least one of its copies must be in the batch.
+        let copyHashes = Set(selected.lazy.filter { !$0.keeper }.compactMap(\.duplicateHash))
+        var wholeGroups = Set<String>()
+        for item in selected where item.keeper {
+            guard let hash = item.duplicateHash, !incomplete.contains(hash), copyHashes.contains(hash) else { throw SafetyError.keeper }
+            wholeGroups.insert(hash)
+        }
+        let selected = selected.filter { !$0.keeper } + selected.filter(\.keeper)
         var outcome = CleanupOutcome()
+        let job = Self.cleanupJob
+        let clock = ContinuousClock()
+        let cleanStart = clock.now
+        // Logged only: the returned outcome is copied before this runs.
+        defer {
+            var logged = outcome.timings
+            logged.add("Whole cleanup", since: cleanStart, items: selected.count)
+            PhaseTimings.log.notice("Cleanup timings\n\(logged.summary, privacy: .public)")
+        }
         var checked = 0
         var phase = CleanupProgress.Phase.checking
         var currentFile = selected.first?.url.lastPathComponent
@@ -91,11 +151,15 @@ public struct TrashService: Sendable {
         }
         report(force: true)
         defer { report(force: true) }
-        if selected.contains(where: { $0.category == .browsers }), await browsersRunning() {
-            outcome.errors.append(SafetyError.browserRunning.localizedDescription)
-            return outcome
+        if selected.contains(where: { $0.category == .browsers }) {
+            let started = clock.now
+            let running = await browsersRunning()
+            outcome.timings.add("Browser-running check", since: started)
+            if running {
+                outcome.errors.append(SafetyError.browserRunning.localizedDescription)
+                return outcome
+            }
         }
-        guard !selected.contains(where: \.keeper) else { throw SafetyError.keeper }
         // Preflight the entire batch. Stale files stay untouched; unsafe paths still abort before any move.
         var approved: [Candidate] = []
         approved.reserveCapacity(selected.count)
@@ -103,7 +167,9 @@ public struct TrashService: Sendable {
             try Task.checkCancellation()
             currentFile = item.url.lastPathComponent
             report()
-            do { try autoreleasepool { try scanner.validateSelection([item], all: all, folders: folders) } }
+            let started = clock.now
+            defer { outcome.timings.add("Checking: safety check before any move", since: started) }
+            do { try autoreleasepool { try scanner.validateSelection([item], all: all, folders: folders, wholeGroups: wholeGroups) } }
             catch {
                 guard staleFile(item, all: all, error: error) else { throw error }
                 outcome.skippedIDs.append(item.id)
@@ -116,7 +182,9 @@ public struct TrashService: Sendable {
         guard !approved.isEmpty else { return outcome }
         currentFile = nil
         report(force: true)
+        let historyStart = clock.now
         try autoreleasepool { _ = try history.records() } // Validate once; subsequent appends stay constant-size.
+        outcome.timings.add("Load recovery history", since: historyStart)
         phase = .moving
         currentFile = approved.first?.url.lastPathComponent
         report(force: true)
@@ -128,21 +196,33 @@ public struct TrashService: Sendable {
             do {
                 try Task.checkCancellation()
                 if item.category == .browsers {
-                    if await browsersRunning() { throw SafetyError.browserRunning }
+                    let started = clock.now
+                    let running = await browsersRunning()
+                    outcome.timings.add("Browser-running check", since: started)
+                    if running { throw SafetyError.browserRunning }
                 }
                 // Bound Foundation temporaries per file, even for queues containing hundreds of thousands of files.
                 let journalUpdated = try autoreleasepool {
-                    try scanner.validateSelection([item], all: all, folders: folders)
+                    var started = clock.now
+                    do { try scanner.validateSelection([item], all: all, folders: folders, wholeGroups: wholeGroups) }
+                    catch { outcome.timings.add("Moving: safety recheck", since: started); throw error }
+                    outcome.timings.add("Moving: safety recheck", since: started)
                     // Persist intent first; an interrupted move remains in recovery history.
                     let id = UUID(), date = Date()
-                    try history.append(TrashRecord(id: id, original: item.url, trashed: nil, fingerprint: item.fingerprint, date: date))
+                    started = clock.now
+                    try history.append(TrashRecord(id: id, original: item.url, trashed: nil, fingerprint: item.fingerprint, date: date, job: job))
+                    outcome.timings.add("Moving: write recovery record", since: started)
                     intentID = id
                     attemptedMove = true
+                    started = clock.now
                     let trashURL = try moveToTrash(item.url)
+                    outcome.timings.add("Moving: move to Trash", since: started, bytes: item.bytes)
                     outcome.count += 1
                     outcome.bytes += item.bytes
                     outcome.movedIDs.append(item.id)
-                    do { try history.append(TrashRecord(id: id, original: item.url, trashed: trashURL, fingerprint: item.fingerprint, date: date)) }
+                    started = clock.now
+                    defer { outcome.timings.add("Moving: write recovery record", since: started) }
+                    do { try history.append(TrashRecord(id: id, original: item.url, trashed: trashURL, fingerprint: item.fingerprint, date: date, job: job)) }
                     catch {
                         outcome.errors.append("Moved to Trash, but recovery history could not be updated: \(item.url.path). Recover it using Finder’s Trash.")
                         return false

@@ -65,4 +65,14 @@ final class NGramSearchTests: XCTestCase, @unchecked Sendable {
         do { _ = try await cancelledSearch.value; XCTFail("Expected cancelled search") }
         catch is CancellationError { }
     }
+
+    func testPathSearchMatchesEveryWordInAnyOrderAndEmptyQueryMatchesAll() throws {
+        let search = try PathSearch(["/Users/me/Downloads/Install_ChatGPT_Atlas.dmg",
+                                     "/Users/me/Downloads/Archived/atlas-notes.txt",
+                                     "/Users/me/Library/Caches/Google/Chrome/data_1"])
+        XCTAssertEqual(try search.matches("atlas chatgpt"), [0])
+        XCTAssertEqual(try search.matches("ATLAS"), [0, 1])
+        XCTAssertEqual(try search.matches("   "), [0, 1, 2])
+        XCTAssertEqual(try search.matches("atlas missing"), [])
+    }
 }

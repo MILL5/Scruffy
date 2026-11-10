@@ -24,7 +24,7 @@ public enum CleanupCategory: String, CaseIterable, Sendable, Identifiable {
     }
     public var explanation: String {
         switch self {
-        case .duplicates: "Identical contents, verified with SHA-256. One original is always protected. Review locations before choosing copies."
+        case .duplicates: "Identical contents, verified with SHA-256. One original is kept unless you choose every copy. Click a checkbox again to add the next copy; Control-click chooses them all."
         case .downloads: "Files untouched for at least 30 days. Age does not mean unwanted: review each file before selecting it."
         case .browsers: "Downloaded web resources such as JavaScript and images only. Saved passwords, cookies, bookmarks and browsing history stay untouched. Any running browsers must close before cleanup."
         case .caches: "pip, uv and npm download caches. Recreated as needed; future installs may require a download. Quit package managers first."
@@ -75,8 +75,8 @@ public struct ScanOptions: Sendable {
     public var downloads = true
     public var duplicates = true
     public var browsers = true
-    public var caches = false
-    public var temporary = false
+    public var caches = true
+    public var temporary = true
     public var large = true
     public var videos = true
     public init(folders: [URL]) { self.folders = folders }
@@ -95,6 +95,10 @@ public struct ScanResult: Sendable {
     public let candidateBytes: Int64
     public let duplicateCounts: [String: Int]
     public let keepersByHash: [String: Candidate]
+    /// Every file of a category, largest first, including protected originals.
+    public let filesByCategory: [CleanupCategory: [Candidate]]
+    /// Set only on the result a completed scan returns.
+    public internal(set) var timings: PhaseTimings?
     public init(files: [Candidate], notes: [String], videos: [Candidate] = []) {
         self.files = files; self.notes = notes
         var alreadySorted = true
@@ -108,8 +112,10 @@ public struct ScanResult: Sendable {
         var counts: [CleanupCategory: Int] = [:], sizes: [CleanupCategory: Int64] = [:]
         var duplicates: [String: Int] = [:]
         var total: Int64 = 0
-        for item in files {
+        var sections: [CleanupCategory: [Candidate]] = [:]
+        for item in filesBySize {
             index[item.id] = item
+            sections[item.category, default: []].append(item)
             if !item.keeper {
                 counts[item.category, default: 0] += 1
                 sizes[item.category, default: 0] += item.bytes
@@ -122,6 +128,7 @@ public struct ScanResult: Sendable {
         }
         filesByID = index; categoryCounts = counts; categoryBytes = sizes
         candidateBytes = total; duplicateCounts = duplicates; keepersByHash = keepers
+        filesByCategory = sections
     }
 }
 
@@ -169,6 +176,15 @@ public struct CleanupScanner: Sendable {
             var info = stat()
             guard lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { return nil }
             return Self(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
+        }
+    }
+    /// Files a browser is still writing, or left behind by an interrupted download.
+    /// Chromium uses .crdownload, Firefox .part, Safari a .download package, Edge legacy .partial.
+    public static func isPendingDownload(_ url: URL) -> Bool {
+        url.pathComponents.contains {
+            let lower = $0.lowercased()
+            return lower.hasSuffix(".crdownload") || lower.hasSuffix(".part")
+                || lower.hasSuffix(".download") || lower.hasSuffix(".partial")
         }
     }
     public func allowed(_ url: URL) -> Bool {
@@ -309,11 +325,21 @@ public struct CleanupScanner: Sendable {
         var snapshotVideoCount = -1
         let fm = FileManager.default
         let now = Date()
+        let clock = ContinuousClock()
+        let scanStart = clock.now
+        var timings = PhaseTimings()
+        var pendingDownloads = 0
+        defer {
+            if timings["Whole scan"] == nil { timings.add("Scan stopped early after", since: scanStart) }
+            PhaseTimings.log.notice("Scan timings\n\(timings.summary, privacy: .public)")
+        }
         func snapshot() -> ScanResult {
             // Ready candidates never change after publication. Status-only updates
             // can share the same sorted files and indexes instead of rebuilding them.
             if ready.count == snapshotFileCount, notes.count == snapshotNoteCount, videoReady.count == snapshotVideoCount,
                let cachedSnapshot { return cachedSnapshot }
+            let started = clock.now
+            defer { timings.add("Sort and index results for display", since: started) }
             let result = ScanResult(files: ready.values.sorted {
                 $0.bytes == $1.bytes ? $0.id < $1.id : $0.bytes > $1.bytes
             }, notes: notes.sorted(), videos: Array(videoReady.values))
@@ -340,14 +366,21 @@ public struct CleanupScanner: Sendable {
             while let discovered = enumerator.nextObject() as? URL {
                 let url = discovered.standardizedFileURL
                 try Task.checkCancellation()
-                guard allowed(url, ancestorCache: &ancestorCache) else { enumerator.skipDescendants(); continue }
+                let safetyStart = clock.now
+                let permitted = allowed(url, ancestorCache: &ancestorCache)
+                timings.add("Walk: safety check", since: safetyStart)
+                guard permitted else { enumerator.skipDescendants(); continue }
                 if category == nil && isWithin(url, home.appendingPathComponent("Library")) {
                     enumerator.skipDescendants(); continue
                 }
                 guard visited.insert(url.path).inserted else { enumerator.skipDescendants(); continue }
-                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isPackageKey, .contentAccessDateKey]),
-                      values.isRegularFile == true, values.isPackage != true,
-                      let fingerprint = try? Fingerprint.read(url), fingerprint.links == 1, fingerprint.size > 0 else { continue }
+                let metadataStart = clock.now
+                let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isPackageKey, .contentAccessDateKey])
+                let fingerprint = values?.isRegularFile == true && values?.isPackage != true ? try? Fingerprint.read(url) : nil
+                timings.add("Walk: file metadata", since: metadataStart)
+                guard let values, let fingerprint, fingerprint.links == 1, fingerprint.size > 0 else { continue }
+                // An unfinished download is never offered for cleanup, whatever its size or age.
+                if category == nil && Self.isPendingDownload(url) { pendingDownloads += 1; continue }
                 enumerated += 1
                 publish(category.map { "Scanning \($0.rawValue.lowercased())" } ?? personalPhase)
                 let lastUse = max(fingerprint.modified, values.contentAccessDate ?? fingerprint.modified)
@@ -376,7 +409,12 @@ public struct CleanupScanner: Sendable {
             personalScanned = true
             personalPhase = phase
             personalCategory = category
+            let started = clock.now, before = enumerated
+            defer { timings.add("Walk personal folders", since: started, items: enumerated - before) }
             for root in options.folders { try walk(root, category: nil) }
+            if pendingDownloads > 0 {
+                notes.insert("Left out \(pendingDownloads) unfinished download\(pendingDownloads == 1 ? "" : "s") (.crdownload, .part, .download, .partial)")
+            }
         }
         func publishPersonal(_ category: CleanupCategory) throws {
             let phase = "Scanning \(category.rawValue.lowercased())"
@@ -404,6 +442,8 @@ public struct CleanupScanner: Sendable {
                     for item in group {
                         try Task.checkCancellation()
                         do {
+                            let started = clock.now
+                            defer { timings.add("Duplicates: compare file starts and ends", since: started) }
                             let sample = try hashContents(item.url, sample: true)
                             guard try Fingerprint.read(item.url) == item.fingerprint else {
                                 notes.insert("Changed during scan: \(item.url.path)"); continue
@@ -419,6 +459,8 @@ public struct CleanupScanner: Sendable {
                         for item in candidates {
                             try Task.checkCancellation()
                             do {
+                                let started = clock.now
+                                defer { timings.add("Duplicates: read whole files", since: started, bytes: item.bytes) }
                                 let hash = try digest(item.url)
                                 guard try Fingerprint.read(item.url) == item.fingerprint else {
                                     verified.removeValue(forKey: item.id)
@@ -457,6 +499,8 @@ public struct CleanupScanner: Sendable {
         }
         if options.downloads { try publishPersonal(.downloads) }
         if options.browsers {
+            let started = clock.now, before = enumerated
+            defer { timings.add("Walk browser caches", since: started, items: enumerated - before) }
             for root in browserRoots { try walk(root, category: .browsers, age: 86400) }
             for root in profileRoots {
                 for profile in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
@@ -471,10 +515,14 @@ public struct CleanupScanner: Sendable {
             publish("Scanning browser caches", force: true)
         }
         if options.caches {
+            let started = clock.now, before = enumerated
+            defer { timings.add("Walk developer caches", since: started, items: enumerated - before) }
             for root in cacheRoots { try walk(root, category: .caches, age: 7 * 86400) }
             publish("Scanning developer caches", force: true)
         }
         if options.temporary {
+            let started = clock.now, before = enumerated
+            defer { timings.add("Walk temporary files", since: started, items: enumerated - before) }
             try walk(temp, category: .temporary, age: 7 * 86400)
             publish("Scanning temporary files", force: true)
         }
@@ -489,15 +537,24 @@ public struct CleanupScanner: Sendable {
             publish("Scanning videos", force: true)
         }
         publish("Scan complete", force: true)
-        return snapshot()
+        var finished = snapshot()
+        timings.add("Whole scan", since: scanStart, items: enumerated)
+        finished.timings = timings
+        return finished
     }
 
     // Validate the entire batch before moving any item. Called again for each item just before Trash.
-    public func validateSelection(_ selected: [Candidate], all: [Candidate], folders: [URL]) throws {
+    /// `wholeGroups` holds the hashes of duplicate groups the user chose in full, original included.
+    /// Only those originals may be removed; every other original stays protected.
+    public func validateSelection(_ selected: [Candidate], all: [Candidate], folders: [URL],
+                                  wholeGroups: Set<String> = []) throws {
         let ids = Set(selected.map(\.id))
         for item in selected {
             try validateLocation(item, folders: folders)
-            guard !item.keeper else { throw SafetyError.keeper }
+            if item.keeper {
+                guard let hash = item.duplicateHash, wholeGroups.contains(hash) else { throw SafetyError.keeper }
+                continue
+            }
             if let hash = item.duplicateHash {
                 guard let keeper = all.first(where: { $0.duplicateHash == hash && $0.keeper && !ids.contains($0.id) }) else { throw SafetyError.keeper }
                 try validateLocation(keeper, folders: folders)
