@@ -199,6 +199,157 @@ final class TrashJournalTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try Data(contentsOf: fixture.legacy), legacy)
     }
 
+    func testCompactionKeepsTheSameRecordsInFewerLinesAndNeverTouchesLegacy() throws {
+        let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
+        let kept = record("legacy-kept", trashed: true), restored = record("legacy-restored", trashed: true)
+        try fixture.writeLegacy([kept, restored])
+        let legacy = try Data(contentsOf: fixture.legacy)
+        let journal = fixture.journal
+        try journal.remove(restored.id)
+        var live: [TrashRecord] = []
+        for index in 0..<40 {
+            let intent = record("file-\(index)")
+            try journal.append(intent)
+            var moved = intent; moved.trashed = URL(fileURLWithPath: "/fixture/.Trash/file-\(index)")
+            try journal.append(moved)
+            if index % 2 == 0 { try journal.remove(intent.id) } else { live.append(moved) }
+        }
+        let before = try journal.records()
+        XCTAssertEqual(before.map(\.id), [kept.id] + live.map(\.id))
+        let oldSize = try Data(contentsOf: fixture.events).count
+        var oldInfo = stat(); XCTAssertEqual(lstat(fixture.events.path, &oldInfo), 0)
+
+        XCTAssertEqual(try journal.compact(), 0)
+
+        let after = try journal.records()
+        XCTAssertEqual(after.map(\.id), before.map(\.id))
+        XCTAssertEqual(after.map(\.trashed), before.map(\.trashed))
+        let compacted = try Data(contentsOf: fixture.events)
+        // One removal for the restored legacy record, one line per live logged record.
+        XCTAssertEqual(compacted.filter { $0 == 0x0a }.count, 1 + live.count)
+        XCTAssertLessThan(compacted.count, oldSize / 2)
+        var newInfo = stat(); XCTAssertEqual(lstat(fixture.events.path, &newInfo), 0)
+        XCTAssertEqual(newInfo.st_mode & 0o777, 0o600)
+        XCTAssertEqual(newInfo.st_nlink, 1)
+        XCTAssertEqual(try Data(contentsOf: fixture.legacy), legacy)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.events.appendingPathExtension("compacting").path))
+        // A fresh instance reads the same history, and a second pass has nothing left to do.
+        XCTAssertEqual(try fixture.journal.records().map(\.id), before.map(\.id))
+        XCTAssertEqual(try journal.compact(), 0)
+        XCTAssertEqual(try Data(contentsOf: fixture.events), compacted)
+        // The journal keeps working after its file was replaced.
+        let later = record("later", trashed: true)
+        try journal.append(later)
+        XCTAssertEqual(try journal.records().last?.id, later.id)
+    }
+
+    func testCompactionDropsNamedRecordsFromBothFilesAndIgnoresUnknownIDs() throws {
+        let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
+        let legacyGone = record("legacy-gone", trashed: true), legacyKept = record("legacy-kept", trashed: true)
+        try fixture.writeLegacy([legacyGone, legacyKept])
+        let legacy = try Data(contentsOf: fixture.legacy)
+        let journal = fixture.journal
+        let loggedGone = record("logged-gone", trashed: true), loggedKept = record("logged-kept", trashed: true)
+        try journal.append(loggedGone); try journal.append(loggedKept)
+
+        XCTAssertEqual(try journal.compact(dropping: [legacyGone.id, loggedGone.id, UUID()]), 2)
+
+        XCTAssertEqual(try journal.records().map(\.id), [legacyKept.id, loggedKept.id])
+        XCTAssertEqual(try fixture.journal.records().map(\.id), [legacyKept.id, loggedKept.id])
+        XCTAssertEqual(try Data(contentsOf: fixture.legacy), legacy)
+        XCTAssertEqual(try Data(contentsOf: fixture.events).filter { $0 == 0x0a }.count, 2)
+    }
+
+    func testCompactionJudgesEachRecordAsTheLogHoldsItUnderTheLock() throws {
+        let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
+        let journal = fixture.journal
+        let pending = record("pending"), finished = record("finished")
+        try journal.append(pending)
+        try journal.append(finished)
+        // A reader took its copy here, while both were still intent-only. Then one move completed.
+        let stale = try journal.records()
+        var moved = finished; moved.trashed = URL(fileURLWithPath: "/fixture/.Trash/finished")
+        try journal.append(moved)
+        XCTAssertEqual(stale.filter { $0.trashed == nil }.count, 2)
+
+        XCTAssertEqual(try journal.compact(where: { $0.trashed == nil }), 1)
+
+        let left = try journal.records()
+        XCTAssertEqual(left.map(\.id), [finished.id])
+        XCTAssertNotNil(left.first?.trashed)
+        // A move that completes after its intent was dropped still ends with its full record.
+        var later = pending; later.trashed = URL(fileURLWithPath: "/fixture/.Trash/pending")
+        try journal.append(later)
+        XCTAssertEqual(try journal.records().map(\.id), [finished.id, pending.id])
+    }
+
+    func testAnotherInstanceAppendingRightAfterCompactionIsNeverTruncatedAway() throws {
+        let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
+        let compacting = fixture.journal, other = fixture.journal
+        let first = record("first", trashed: true)
+        try compacting.append(first); try compacting.append(first)
+        XCTAssertEqual(try compacting.compact(), 0)
+        let second = record("second", trashed: true), third = record("third", trashed: true)
+        try other.append(second)
+        try compacting.append(third)
+        XCTAssertEqual(try fixture.journal.records().map(\.id), [first.id, second.id, third.id])
+        try compacting.remove(first.id)
+        XCTAssertEqual(try other.records().map(\.id), [second.id, third.id])
+    }
+
+    func testLegacyOnlyHistoryGetsALogOnlyWhenARecordIsDropped() throws {
+        let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
+        let first = record("first", trashed: true), second = record("second", trashed: true)
+        try fixture.writeLegacy([first, second])
+        let journal = fixture.journal
+        XCTAssertEqual(try journal.compact(), 0)
+        XCTAssertEqual(try journal.compact(dropping: [UUID()]), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.events.path))
+        XCTAssertEqual(try journal.compact(dropping: [first.id]), 1)
+        XCTAssertEqual(try journal.records().map(\.id), [second.id])
+    }
+
+    func testInterruptedCompactionLeftoverIsReplacedAndMalformedLogIsNeverRewritten() throws {
+        let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
+        let journal = fixture.journal
+        let first = record("first", trashed: true)
+        try journal.append(first); try journal.append(first)
+        try Data("partial earlier attempt".utf8).write(to: fixture.events.appendingPathExtension("compacting"))
+        XCTAssertEqual(try journal.compact(), 0)
+        XCTAssertEqual(try journal.records().map(\.id), [first.id])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.events.appendingPathExtension("compacting").path))
+
+        try appendRaw(Data("{not an event}\n".utf8), to: fixture.events)
+        let damaged = try Data(contentsOf: fixture.events)
+        XCTAssertThrowsError(try fixture.journal.compact(dropping: [first.id]))
+        XCTAssertEqual(try Data(contentsOf: fixture.events), damaged)
+    }
+
+    func testAnotherInstanceKeepsAppendingAcrossRepeatedCompaction() throws {
+        let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
+        let records = (0..<200).map { record("busy-\($0)") }
+        let errors = Errors()
+        DispatchQueue.concurrentPerform(iterations: 3) { worker in
+            let journal = fixture.journal
+            if worker == 2 {
+                for _ in 0..<60 { do { try journal.compact() } catch { errors.add("compact: \(error.localizedDescription)") } }
+                return
+            }
+            for index in stride(from: worker, to: records.count, by: 2) {
+                do {
+                    try journal.append(records[index])
+                    var moved = records[index]; moved.trashed = URL(fileURLWithPath: "/fixture/.Trash/\(index)")
+                    try journal.append(moved)
+                } catch { errors.add("append: \(error.localizedDescription)") }
+            }
+        }
+        XCTAssertTrue(errors.values.isEmpty, errors.values.joined(separator: "\n"))
+        let replay = try fixture.journal.records()
+        XCTAssertEqual(Set(replay.map(\.id)), Set(records.map(\.id)))
+        XCTAssertEqual(replay.count, records.count)
+        XCTAssertTrue(replay.allSatisfy { $0.trashed != nil })
+    }
+
     private final class Errors: @unchecked Sendable {
         private let lock = NSLock()
         private var messages: [String] = []

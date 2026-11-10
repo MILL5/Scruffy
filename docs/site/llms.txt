@@ -1,18 +1,20 @@
 # Scruffy
 
-> Scruffy is a native Mac cleanup app for macOS 14 and later. It finds duplicate files, old downloads, large files, videos and caches, lets the user review every file, moves the chosen files to macOS Trash, and can undo a cleanup. Everything runs locally: no account, no analytics, no uploads.
+> Scruffy is a native Mac cleanup app for Apple silicon Macs running macOS 26 or later. It finds duplicate files, old downloads, large files, videos and caches, lets the user review every file, moves the chosen files to macOS Trash, and can undo a cleanup. Everything runs locally: no account, no analytics, no uploads.
 
 Scruffy is in development. No public download is offered yet. It is built by Richard (Rich) Crane as part of Inventing Fire with AI, with MILL5.
 
 ## What it does
 
-- Finds exact duplicate files by content, confirmed with SHA-256. One original in each group is kept unless the user explicitly chooses every copy.
+- Finds exact duplicate files by content, confirmed with SHA-256. One original in each group is kept unless the user explicitly chooses every copy. The user can choose which copy is kept.
 - Reviews downloads untouched for 30 days, files of 500 MB or more, browser caches, developer caches (pip, uv, npm) and user temporary files.
-- Leaves out known cloud-sync folders, symlinks, hard links, app bundles, photo libraries, sensitive system locations and unfinished downloads (.crdownload, .part, .download, .partial).
+- Leaves out known cloud-sync folders, cloud files that are not downloaded, other disks mounted in the home folder, symlinks, hard links, app bundles, photo libraries, sensitive system locations and unfinished downloads (.crdownload, .part, .download, .partial).
 - Selects nothing automatically. Cleanup moves only the chosen files to macOS Trash after a confirmation and a fresh check of each file.
 - Never empties Trash. Space is released only when the user empties Trash.
 - Undoes a cleanup job with one button: files still in Trash go back to their original places, and existing files are never replaced.
-- Keeps a searchable local recovery history for restoring single files.
+- Keeps a searchable local recovery history for restoring single files. Entries for files no longer in Trash are cleared at launch.
+- Remembers the chosen folders and scan options between launches.
+- Shows each file's size and modified date, and says which folder it is waiting for when macOS is asking for permission.
 - Searches file names and paths by independent words in any order.
 - Makes HEVC copies of MP4, MOV and M4V videos at the same resolution and keeps a copy only when it is smaller.
 - Offers system purge and Time Machine local snapshot reclamation as separate, reviewed actions that bypass Trash.
@@ -21,7 +23,7 @@ Scruffy is in development. No public download is offered yet. It is built by Ric
 
 ### What is Scruffy?
 
-Scruffy is a native Mac cleanup app for macOS 14 and later. It finds duplicate files, old downloads, large files, videos, browser caches, developer caches and temporary files, then lets you review each one before anything moves to Trash.
+Scruffy is a native Mac cleanup app for Apple silicon Macs running macOS 26 or later. It finds duplicate files, old downloads, large files, videos, browser caches, developer caches and temporary files, then lets you review each one before anything moves to Trash.
 
 ### Does Scruffy delete files permanently?
 

@@ -1,15 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# SCRUFFY_UNIVERSAL=1 builds for Apple silicon and Intel. SCRUFFY_SIGN_IDENTITY signs for distribution.
-if [[ "${SCRUFFY_UNIVERSAL:-0}" == 1 ]]; then
-    swift build -c release --arch arm64 --arch x86_64
-    BIN=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)
-else
-    swift build -c release
-    BIN=.build/release
-fi
+# Apple silicon only. SCRUFFY_SIGN_IDENTITY signs for distribution.
+swift build -c release --arch arm64
+BIN=$(swift build -c release --arch arm64 --show-bin-path)
 APP="${SCRUFFY_APP_PATH:-$PWD/dist/Scruffy.app}"
+# Start from an empty bundle so files from an earlier build (old icons, renamed helpers) never ship.
+[[ "$APP" == *.app ]] || { echo "SCRUFFY_APP_PATH must end in .app: $APP" >&2; exit 1; }
+rm -rf "$APP/Contents"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mkdir -p "$APP/Contents/Helpers"
 cp "$BIN/Scruffy" "$APP/Contents/MacOS/Scruffy"
@@ -35,9 +33,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>Scruffy</string>
 <key>CFBundleIconFile</key><string>ScruffyBright.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.5.0</string>
-<key>CFBundleVersion</key><string>7</string>
-<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>CFBundleShortVersionString</key><string>0.6.0</string>
+<key>CFBundleVersion</key><string>8</string>
+<key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>LSMultipleInstancesProhibited</key><true/>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSDownloadsFolderUsageDescription</key><string>Scruffy reviews your downloads for old and duplicate files. Nothing is removed without your selection and confirmation.</string>

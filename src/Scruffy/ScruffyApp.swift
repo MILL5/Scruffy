@@ -12,7 +12,9 @@ struct ScruffyApp: App {
     @State private var showSettings = false
     init() {
         SingleInstanceLock.enforce()
-        _model = StateObject(wrappedValue: AppModel())
+        let model = AppModel(settings: .standard)
+        Task { await model.tidyRecoveryHistory() }
+        _model = StateObject(wrappedValue: model)
     }
     private var launchSize: CGSize {
         let screen = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1280, height: 900)
@@ -154,7 +156,9 @@ struct ContentView: View {
                 } else {
                     header.padding(inset)
                     if model.result != nil {
-                        if !(compact && cleanupJobsExpanded && !model.cleanupJobs.isEmpty) {
+                        if model.activeCategory != nil {
+                            categorySummary.padding(.horizontal, inset).padding(.bottom, 12)
+                        } else if !(compact && cleanupJobsExpanded && !model.cleanupJobs.isEmpty) {
                             overview.padding(.horizontal, inset).padding(.bottom, compact ? 12 : 22)
                         }
                         results
@@ -240,7 +244,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Button { showHistory = true } label: { Label("Recovery history", systemImage: "arrow.uturn.backward") }.buttonStyle(.plain).disabled(videos.busy)
             }
-            Text("LOCAL ONLY  ·  NO UPLOADS").font(.system(size: 9, weight: .medium)).tracking(1).foregroundStyle(.tertiary)
+            Text("LOCAL ONLY  ·  NO UPLOADS").font(.system(size: 10, weight: .medium)).tracking(1).foregroundStyle(.tertiary)
         }.padding(compact ? 14 : 22).frame(width: sidebarWidth).background(theme.sidebar)
             .overlay(alignment: .trailing) { Rectangle().fill(theme.border).frame(width: 1) }
     }
@@ -254,8 +258,8 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular)).lineLimit(1)
                         if let bytes {
-                            Text("\(formatBytes(bytes)) · \(count.formatted()) files")
-                                .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+                            Text("\(formatBytes(bytes)) · \(fileCount(count))")
+                                .font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 } else {
@@ -274,7 +278,7 @@ struct ContentView: View {
                     selectedCategoryLabel(count: selectedCount, bytes: selectedBytes)
                     if !compact {
                         Spacer(minLength: 4)
-                        Text("\(count.formatted()) files").font(.caption2).monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                        Text(fileCount(count)).font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary).fixedSize()
                     }
                 }.padding(.leading, 28)
             }
@@ -294,9 +298,12 @@ struct ContentView: View {
         item.duplicateHash.map(model.fullySelectedGroups.contains) == true
     }
     private func selectedCategoryLabel(count: Int, bytes: Int64) -> some View {
-        Label("\(count.formatted()) selected · \(formatBytes(bytes))", systemImage: count > 0 ? "checkmark.circle.fill" : "circle")
-            .font(.system(size: 9)).monospacedDigit().lineLimit(1)
-            .foregroundStyle(count > 0 ? theme.accent : theme.text.opacity(0.5))
+        // The size is dropped before anything is cut off: large file counts leave little room beside it.
+        ViewThatFits(in: .horizontal) {
+            Label("\(count.formatted()) selected · \(formatBytes(bytes))", systemImage: count > 0 ? "checkmark.circle.fill" : "circle")
+            Label("\(count.formatted()) selected", systemImage: count > 0 ? "checkmark.circle.fill" : "circle")
+        }.font(.system(size: 11)).monospacedDigit().lineLimit(1)
+            .foregroundStyle(count > 0 ? theme.accent : theme.text.opacity(0.6))
     }
     private var header: some View {
         Group {
@@ -337,7 +344,7 @@ struct ContentView: View {
                 ScruffyMark().frame(width: compact ? 90 : 138, height: compact ? 90 : 138)
             }
             Text(model.busy ? "Giving your Mac a once-over…" : "A clean Mac starts with a clear picture.").font(.system(size: compact ? 18 : 22, weight: .medium, design: .rounded)).multilineTextAlignment(.center)
-            Text("Scruffy finds old downloads, exact duplicates and browser caches.\nYou decide what goes. Your first scan won’t change a thing.")
+            Text("Scruffy finds old downloads, exact duplicates, large files and caches.\nYou decide what goes. Your first scan won’t change a thing.")
                 .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center).lineSpacing(5)
             if model.busy { ProgressView().controlSize(.small).tint(theme.accent) }
             else {
@@ -356,10 +363,10 @@ struct ContentView: View {
                 Text("SPACE TO REVIEW").font(.system(size: 10, weight: .medium)).tracking(1.5).foregroundStyle(.secondary)
                 Text(formatBytes(model.summaryBytes)).font(.system(size: compact ? 27 : 38, weight: .semibold, design: .rounded))
                     .lineLimit(1).minimumScaleFactor(0.8)
-                Label("\(model.summarySelectedCount.formatted()) files · \(formatBytes(model.summarySelectedBytes)) selected", systemImage: model.summarySelectedCount > 0 ? "checkmark.circle.fill" : "circle")
-                    .font(.caption).foregroundStyle(model.summarySelectedCount > 0 ? theme.accent : theme.text.opacity(0.5))
+                Label("\(fileCount(model.summarySelectedCount)) · \(formatBytes(model.summarySelectedBytes)) selected", systemImage: model.summarySelectedCount > 0 ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 12)).foregroundStyle(model.summarySelectedCount > 0 ? theme.accent : theme.text.opacity(0.6))
                 Text(compact ? "Logical sizes; actual disk savings can differ." : "Logical file sizes, not guaranteed disk savings.\nAPFS clones and compression can affect actual space.")
-                    .font(compact ? .caption2 : .caption).foregroundStyle(.secondary)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
             if compact {
@@ -371,6 +378,24 @@ struct ContentView: View {
                 .menuStyle(.borderlessButton).fixedSize()
             } else { overviewLegend }
         }.padding(compact ? 14 : 24).background(theme.card, in: RoundedRectangle(cornerRadius: 17)).overlay(RoundedRectangle(cornerRadius: 17).stroke(theme.border))
+    }
+    /// One category gets a line, not the chart card: its chart would be a single full ring.
+    private var categorySummary: some View {
+        let caveat = Text("Logical sizes; actual disk savings can differ.").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: compact ? 10 : 16) {
+                Text(formatBytes(model.summaryBytes)).font(.system(size: compact ? 17 : 20, weight: .semibold, design: .rounded)).lineLimit(1)
+                Text("\(fileCount(model.activeCategory.map(model.count) ?? 0)) to review").font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                Label("\(fileCount(model.summarySelectedCount)) · \(formatBytes(model.summarySelectedBytes)) selected", systemImage: model.summarySelectedCount > 0 ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 12)).lineLimit(1)
+                    .foregroundStyle(model.summarySelectedCount > 0 ? theme.accent : theme.text.opacity(0.6))
+                Spacer(minLength: 0)
+                if !compact { caveat }
+            }
+            if compact { caveat }
+        }.padding(.horizontal, 16).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)
+            .background(theme.card, in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.border))
+            .help("Logical file sizes, not guaranteed disk savings. APFS clones and compression can affect actual space.")
     }
     private var spaceChart: some View {
         Chart {
@@ -394,7 +419,7 @@ struct ContentView: View {
                             Text(category.rawValue)
                             Spacer()
                             Text(formatBytes(model.bytes(category))).monospacedDigit()
-                        }.font(.caption).foregroundStyle(.secondary)
+                        }.font(.system(size: 12)).foregroundStyle(.secondary)
                     }.buttonStyle(.plain)
                 }
             }
@@ -430,23 +455,28 @@ struct ContentView: View {
                                 CandidateFileIcon(path: item.id)
                                 VStack(alignment: .leading, spacing: 4) {
                                     HStack {
-                                        Text(item.url.lastPathComponent).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
-                                        if item.keeper && wholeGroup(item) { Text("ORIGINAL WILL BE REMOVED TOO").font(.system(size: 8, weight: .bold)).foregroundStyle(.orange).padding(4).background(Color.orange.opacity(0.15), in: Capsule()) }
-                                        else if item.keeper { Text("KEEP ORIGINAL").font(.system(size: 8, weight: .bold)).foregroundStyle(theme.accent).padding(4).background(brandBlue.opacity(0.1), in: Capsule()) }
-                                        else if model.activeCategory == nil && !compact { Text(item.category.rawValue).font(.caption2).foregroundStyle(.tertiary) }
+                                        Text(item.url.lastPathComponent).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                                        if item.keeper && wholeGroup(item) { Text("ORIGINAL WILL BE REMOVED TOO").font(.system(size: 9, weight: .bold)).foregroundStyle(.orange).padding(4).background(Color.orange.opacity(0.15), in: Capsule()) }
+                                        else if item.keeper { Text("KEEP ORIGINAL").font(.system(size: 9, weight: .bold)).foregroundStyle(theme.accent).padding(4).background(brandBlue.opacity(0.1), in: Capsule()) }
+                                        else if model.activeCategory == nil && !compact { Text(item.category.rawValue).font(.system(size: 11)).foregroundStyle(.secondary) }
                                     }
                                     Text(item.url.deletingLastPathComponent().path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~"))
-                                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                                     if let hash = item.duplicateHash {
                                         let copies = model.result?.duplicateCounts[hash] ?? 0
                                         Text(wholeGroup(item) ? "Match \(hash.prefix(8)) · all \(copies) copies selected · none will be kept"
                                                 : "Match \(hash.prefix(8)) · \(copies) identical copies")
-                                            .font(.system(size: 9, weight: wholeGroup(item) ? .semibold : .regular))
+                                            .font(.system(size: 11, weight: wholeGroup(item) ? .semibold : .regular))
                                             .foregroundStyle(wholeGroup(item) ? Color.orange : theme.accent)
                                     }
                                 }.frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
                                 Spacer(minLength: 4)
-                                Text(formatBytes(item.bytes)).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(.secondary).fixedSize()
+                                VStack(alignment: .trailing, spacing: 4) {
+                                    Text(formatBytes(item.bytes)).font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
+                                    Text(item.fingerprint.modified.formatted(date: .abbreviated, time: .omitted))
+                                        .font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
+                                        .help("Last modified").accessibilityLabel("Modified \(item.fingerprint.modified.formatted(date: .abbreviated, time: .omitted))")
+                                }.fixedSize()
                             }
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 7).contentShape(Rectangle())
                         }.buttonStyle(.plain).disabled(model.isQueued(item) || model.isFiltering)
@@ -455,6 +485,9 @@ struct ContentView: View {
                     }.listRowBackground(wholeGroup(item) ? Color.orange.opacity(0.14) : (model.selection.contains(item.id) ? theme.accent.opacity(0.12) : theme.card)).contextMenu {
                         if let hash = item.duplicateHash {
                             Button("Select all \(model.result?.duplicateCounts[hash] ?? 0) copies, including the original") { model.advanceSelection(item, all: true) }
+                            if model.canKeepInstead(item) {
+                                Button("Keep this copy instead of the original") { Task { await model.keepInstead(item) } }
+                            }
                         }
                         Button("Preview") { preview = item.url }
                         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
@@ -468,10 +501,19 @@ struct ContentView: View {
                         .padding(.horizontal, inset).padding(.vertical, 8)
                 }
             }
+            if model.permissionDeniedCount > 0 {
+                HStack(spacing: 10) {
+                    Label("macOS did not let Scruffy read \(model.permissionDeniedCount) \(model.permissionDeniedCount == 1 ? "location" : "locations")."
+                          + (compact ? " Some need Full Disk Access." : " Protected ones, such as Safari’s cache, need Full Disk Access. Reopen Scruffy after allowing it."), systemImage: "lock.shield")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("Open Full Disk Access settings") { model.openFullDiskAccessSettings() }.controlSize(.small).fixedSize()
+                }.padding(.horizontal, inset).padding(.top, 8)
+            }
             if let notes = model.result?.notes, !notes.isEmpty {
                 DisclosureGroup("\(notes.count) locations or files could not be scanned") {
                     ScrollView { Text(notes.joined(separator: "\n")).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 85)
-                }.font(.caption).padding(.horizontal, inset).padding(.vertical, 8)
+                }.font(.system(size: 11)).padding(.horizontal, inset).padding(.vertical, 8)
             }
         }
     }
@@ -481,7 +523,7 @@ struct ContentView: View {
                 .toggleStyle(.checkbox).fixedSize()
                 .disabled(model.isFiltering || model.visibleSelectableCount == 0)
                 .help("Select all matching files across every page. Protected originals remain unselected.")
-            Text("\(model.visible.count.formatted()) files").font(.subheadline.bold()).lineLimit(1)
+            Text(fileCount(model.visible.count)).font(.subheadline.bold()).lineLimit(1)
             if model.isFiltering || model.isScanning {
                 ProgressView().controlSize(.small)
                 if !compact { Text(model.isFiltering ? "Searching…" : "Scanning continues").font(.caption).foregroundStyle(theme.accent) }
@@ -502,13 +544,18 @@ struct ContentView: View {
             Divider()
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(model.selection.isEmpty ? "Nothing selected" : "\(model.selection.count.formatted()) files · \(formatBytes(model.selectedBytes)) selected")
+                    Text(model.selection.isEmpty ? "Nothing selected" : "\(fileCount(model.selection.count)) · \(formatBytes(model.selectedBytes)) selected")
                         .font(.subheadline.bold()).lineLimit(1).minimumScaleFactor(0.85)
                     if model.hasSelectionOutsideCategory {
-                        Text("Includes files selected in other categories.").font(.caption).foregroundStyle(.secondary)
+                        Text("Includes files selected in other categories.").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    if let folder = model.scanWaitingOn {
+                        // The scan cannot continue until macOS opens this folder, usually because it is asking for permission.
+                        Label("Waiting for macOS to open \(folder.replacingOccurrences(of: model.scanner.home.path, with: "~")). If macOS is asking for permission, answer it to continue. The prompt can be behind this window.", systemImage: "hand.raised.fill")
+                            .font(.system(size: 11, weight: .medium)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     }
                     Text(model.isCleaning ? "Background cleanup is running. Each job reports its progress below." : model.status)
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(compact ? 2 : 3)
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(compact ? 2 : 3)
                         .help(model.scanTimings.map { "Where the scan time went\n\($0.summary)" } ?? "")
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 Button { model.refreshRunningBrowsers(); showConfirmation = true } label: { Label("Review cleanup", systemImage: "trash") }
@@ -618,7 +665,7 @@ struct ContentView: View {
       ResponsiveSheet(width: 690, idealHeight: 560, windowSize: windowSize) {
         VStack(alignment: .leading, spacing: 16) {
             Text("A way back.").font(.title2.bold())
-            Text("Restore files that Scruffy moved to Trash. Existing files are never replaced. If you emptied Trash, those files cannot be recovered here.").font(.subheadline).foregroundStyle(.secondary)
+            Text("Restore files that Scruffy moved to Trash. Existing files are never replaced. If you emptied Trash, those files cannot be recovered here; their entries are cleared the next time Scruffy opens.").font(.subheadline).foregroundStyle(.secondary)
             if model.isLoadingHistory && model.history.isEmpty {
                 ProgressView("Loading recovery history…").frame(maxWidth: .infinity).frame(height: 180)
             } else if model.history.isEmpty {

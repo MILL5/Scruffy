@@ -61,6 +61,37 @@ public struct TrashService: Sendable {
     public func records() throws -> [TrashRecord] {
         try history.records()
     }
+    /// Housekeeping for recovery history. Drops the records that can no longer lead to a recovery,
+    /// then rewrites the event log without its superseded lines. Returns how many records were dropped.
+    @discardableResult
+    public func tidyHistory() throws -> Int {
+        try history.compact(where: { Self.isBeyondRecovery($0) })
+    }
+    /// True only when it is certain nothing can be restored from this record. Anything unclear keeps it.
+    static func isBeyondRecovery(_ record: TrashRecord, now: Date = Date()) -> Bool {
+        guard let trashed = record.trashed else {
+            // No Trash location: the move is in progress or was interrupted. A record this recent may
+            // belong to a move about to happen. An older one moved nothing if the original is still
+            // the same file in place.
+            guard now.timeIntervalSince(record.date) > 3600 else { return false }
+            return (try? Fingerprint.read(record.original)) == record.fingerprint
+        }
+        // The Trash folder is there, on the volume the file was on, and the item is not in it: emptied,
+        // put back or deleted. A Trash folder that is missing, unreadable or on another volume (an
+        // unmounted disk, no permission, something else mounted at that path) proves nothing.
+        func trashFolder() -> (device: UInt64, inode: UInt64)? {
+            var info = stat()
+            guard lstat(trashed.deletingLastPathComponent().path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+                  UInt64(truncatingIfNeeded: info.st_dev) == record.fingerprint.device else { return nil }
+            return (UInt64(truncatingIfNeeded: info.st_dev), UInt64(info.st_ino))
+        }
+        guard let before = trashFolder() else { return false }
+        var info = stat()
+        guard lstat(trashed.path, &info) != 0, errno == ENOENT else { return false }
+        // The same folder must still be there, or the answer may come from a volume that just went away.
+        guard let after = trashFolder() else { return false }
+        return after == before
+    }
     /// Set around a cleanup so every file it moves is recorded against that job.
     @TaskLocal public static var cleanupJob: UUID?
 
@@ -102,7 +133,7 @@ public struct TrashService: Sendable {
         if lstat(path, &info) != 0 { return errno == ENOENT }
         // Existing symlinks, hard links or replaced volumes are safety failures, not stale-file skips.
         return changed && (info.st_mode & S_IFMT) == S_IFREG && info.st_nlink == 1
-            && UInt64(info.st_dev) == affected.fingerprint.device
+            && UInt64(truncatingIfNeeded: info.st_dev) == affected.fingerprint.device
     }
     public func clean(_ selected: [Candidate], all: [Candidate], folders: [URL],
                       browsersRunning: @Sendable () async -> Bool,
@@ -126,6 +157,15 @@ public struct TrashService: Sendable {
             wholeGroups.insert(hash)
         }
         let selected = selected.filter { !$0.keeper } + selected.filter(\.keeper)
+        // Each group's protected original, looked up once instead of searching every file for every copy.
+        var found: [String: Candidate] = [:]
+        for item in all where item.keeper {
+            if let hash = item.duplicateHash, found[hash] == nil { found[hash] = item }
+        }
+        let originals = found
+        func original(of item: Candidate) -> (String) -> Candidate? {
+            { hash in originals[hash].flatMap { $0.id == item.id ? nil : $0 } }
+        }
         var outcome = CleanupOutcome()
         let job = Self.cleanupJob
         let clock = ContinuousClock()
@@ -161,6 +201,7 @@ public struct TrashService: Sendable {
             }
         }
         // Preflight the entire batch. Stale files stay untouched; unsafe paths still abort before any move.
+        // Locations and fingerprints only: duplicate contents are read in full just before each move.
         var approved: [Candidate] = []
         approved.reserveCapacity(selected.count)
         for item in selected {
@@ -169,7 +210,7 @@ public struct TrashService: Sendable {
             report()
             let started = clock.now
             defer { outcome.timings.add("Checking: safety check before any move", since: started) }
-            do { try autoreleasepool { try scanner.validateSelection([item], all: all, folders: folders, wholeGroups: wholeGroups) } }
+            do { try autoreleasepool { try scanner.validate(item, folders: folders, wholeGroups: wholeGroups, readContents: false, original: original(of: item)) } }
             catch {
                 guard staleFile(item, all: all, error: error) else { throw error }
                 outcome.skippedIDs.append(item.id)
@@ -204,7 +245,7 @@ public struct TrashService: Sendable {
                 // Bound Foundation temporaries per file, even for queues containing hundreds of thousands of files.
                 let journalUpdated = try autoreleasepool {
                     var started = clock.now
-                    do { try scanner.validateSelection([item], all: all, folders: folders, wholeGroups: wholeGroups) }
+                    do { try scanner.validate(item, folders: folders, wholeGroups: wholeGroups, readContents: true, original: original(of: item)) }
                     catch { outcome.timings.add("Moving: safety recheck", since: started); throw error }
                     outcome.timings.add("Moving: safety recheck", since: started)
                     // Persist intent first; an interrupted move remains in recovery history.
