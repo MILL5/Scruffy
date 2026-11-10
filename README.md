@@ -15,16 +15,25 @@ Or open `Package.swift` in Xcode and run the Scruffy executable. `swift test` ru
 
 The Swift targets live in `src/`, automated tests in `tests/`, and packaging/link-check scripts in `scripts/`. The public website is isolated in `docs/site/`; the remaining documentation stays outside the Pages deployment.
 
+## Release
+
+```sh
+./scripts/release.sh            # signed, notarized dist/release/Scruffy.dmg
+./scripts/release.sh --publish  # also creates the GitHub release from docs/releases/<version>.md
+```
+
+Requires the MILL5 Developer ID Application certificate, `create-dmg`, `gh`, and a notarytool Keychain profile (`xcrun notarytool store-credentials ScruffyNotarize --team-id FS6453639M`). `NOTARIZE=0` skips notarization. The version comes from `scripts/build-app.sh`.
+
 ## What it does
 
-- Finds identical data contents using streaming SHA-256 and protects one original in every group; files with resource-fork data are excluded from duplicate detection.
+- Finds identical data contents using streaming SHA-256 and keeps one original in every group unless every copy is explicitly selected; files with resource-fork data are excluded from duplicate detection.
 - Reviews Downloads untouched for 30 days and files at least 500 MB in chosen folders.
 - Reviews allowlisted browser cache files at least one day old, excluding cookies, credentials, bookmarks and history.
-- Optionally reviews pip, uv and npm download caches and user temporary files at least seven days old.
+- Reviews pip, uv and npm download caches and user temporary files at least seven days old. Unfinished downloads (`.crdownload`, `.part`, `.download`, `.partial`) are left out.
 - Provides a category space chart, largest-first file lists, row-click selection, per-section NGramSearch indexes, Quick Look and Reveal in Finder. Each search word matches independently; results must match every word in any order.
 - Finds MP4, MOV and M4V videos in chosen folders for reviewed high-quality HEVC compression. Resolution and file container stay the same; only verified smaller outputs replace originals, which move to Trash with a recovery record.
 - Moves only explicitly selected files to macOS Trash after a confirmation and fresh validation, using named background jobs per category with file counts and visible failures. Changed or missing files are skipped while eligible files continue; failed/interrupted jobs never resume automatically.
-- Keeps a local recovery journal under `~/Library/Application Support/Scruffy/`; restores without overwriting existing files.
+- Keeps a local recovery journal under `~/Library/Application Support/Scruffy/`; restores without overwriting existing files. Recovery history is searchable, and each cleanup job can be undone while its files are still in Trash.
 - Cleans system-marked discardable data and eligible app-container caches through macOS's purge service after explicit review; cloud documents and snapshots are excluded.
 - Separately offers Time Machine snapshot reclamation after explicit review and administrator approval. This action permanently removes some local restore points; it does not use Trash.
 
