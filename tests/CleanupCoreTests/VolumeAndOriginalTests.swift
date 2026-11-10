@@ -155,31 +155,41 @@ final class VolumeAndOriginalTests: XCTestCase, @unchecked Sendable {
         try FileManager.default.moveItem(at: trash.appendingPathComponent("put-back.txt"), to: downloads.appendingPathComponent("put-back.txt"))
 
         let journal = TrashJournal(url: journalURL)
-        func intent(_ url: URL, fingerprint: Fingerprint) -> TrashRecord {
-            TrashRecord(id: UUID(), original: url, trashed: nil, fingerprint: fingerprint, date: Date())
+        let longAgo = Date().addingTimeInterval(-2 * 3600)
+        func intent(_ url: URL, fingerprint: Fingerprint, date: Date) -> TrashRecord {
+            TrashRecord(id: UUID(), original: url, trashed: nil, fingerprint: fingerprint, date: date)
         }
-        // Interrupted before the move: the original is still the same file in place.
+        // Interrupted before the move, hours ago: the original is still the same file in place.
         let untouched = try file(downloads.appendingPathComponent("never-moved.txt"), daysOld: 40)
-        let neverMoved = intent(untouched, fingerprint: try Fingerprint.read(untouched))
+        let neverMoved = intent(untouched, fingerprint: try Fingerprint.read(untouched), date: longAgo)
+        // Written a moment ago with the original still in place: a move that is about to happen.
+        let pending = try file(downloads.appendingPathComponent("about-to-move.txt"), daysOld: 40)
+        let inFlight = intent(pending, fingerprint: try Fingerprint.read(pending), date: Date())
         // Interrupted after the move: the original is gone and only Finder's Trash can help.
-        let lost = intent(downloads.appendingPathComponent("moved-without-record.txt"),
-                          fingerprint: Fingerprint(size: 9, modified: Date(timeIntervalSince1970: 5), device: 1, inode: 2, links: 1))
+        let elsewhere = Fingerprint(size: 9, modified: Date(timeIntervalSince1970: 5), device: 1, inode: 2, links: 1)
+        let lost = intent(downloads.appendingPathComponent("moved-without-record.txt"), fingerprint: elsewhere, date: longAgo)
         // The Trash folder itself is not there, as with an unmounted volume: nothing is proven.
-        var unmounted = intent(downloads.appendingPathComponent("on-unmounted-volume.txt"), fingerprint: lost.fingerprint)
+        var unmounted = intent(downloads.appendingPathComponent("on-unmounted-volume.txt"), fingerprint: try Fingerprint.read(untouched), date: longAgo)
         unmounted.trashed = root.appendingPathComponent("missing-volume/.Trashes/501/on-unmounted-volume.txt")
-        for record in [neverMoved, lost, unmounted] { try journal.append(record) }
-        XCTAssertEqual(try service.records().count, 6)
+        // A Trash folder is there but on a different volume than the file was: nothing is proven either.
+        var otherVolume = intent(downloads.appendingPathComponent("on-other-volume.txt"), fingerprint: elsewhere, date: longAgo)
+        otherVolume.trashed = trash.appendingPathComponent("on-other-volume.txt")
+        for record in [neverMoved, inFlight, lost, unmounted, otherVolume] { try journal.append(record) }
+        XCTAssertEqual(try service.records().count, 8)
 
         XCTAssertEqual(try service.tidyHistory(), 3)
 
         XCTAssertEqual(Set(try service.records().map(\.original.lastPathComponent)),
-                       ["still-in-trash.txt", "moved-without-record.txt", "on-unmounted-volume.txt"])
+                       ["still-in-trash.txt", "about-to-move.txt", "moved-without-record.txt", "on-unmounted-volume.txt", "on-other-volume.txt"])
         XCTAssertEqual(try service.tidyHistory(), 0)
+        // The same pending record an hour later is certain: nothing was moved.
+        XCTAssertFalse(TrashService.isBeyondRecovery(inFlight))
+        XCTAssertTrue(TrashService.isBeyondRecovery(inFlight, now: Date().addingTimeInterval(3700)))
         // What is still in Trash can still be restored afterwards.
         let record = try XCTUnwrap(try service.records().first { $0.original.lastPathComponent == "still-in-trash.txt" })
         try service.restore(record)
         XCTAssertTrue(FileManager.default.fileExists(atPath: downloads.appendingPathComponent("still-in-trash.txt").path))
-        XCTAssertEqual(try service.records().count, 2)
+        XCTAssertEqual(try service.records().count, 4)
     }
 
     func testCloudPlaceholderFlagIsRecognized() {

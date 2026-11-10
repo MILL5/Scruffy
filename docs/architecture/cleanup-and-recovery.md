@@ -8,7 +8,7 @@ A duplicate copy is skipped if its protected original is missing or changed. Dup
 
 Only running supported browser applications with a regular application activation policy block browser-cache cleanup. Terminated apps, background-only processes and browser helpers do not require a quit action. When no browser apps are running, the review says cleanup is ready and enables Move to Trash. When browsers are running, it lists them and offers a normal quit request; cleanup waits for their exit and checks again before moving each cache file. Scruffy never force-quits browsers.
 
-Cleanup asks whether a browser is running before every browser-cache file. The app answers from a list that macOS keeps current as apps launch and quit, rebuilt at least once a second in case a report is missed, with apps that have quit filtered out on every read. Building the list from macOS for each file took about 18 ms per file in a real cleanup: 102 of 115 seconds for 5,663 files.
+Cleanup asks whether a browser is running before every browser-cache file. The app answers from a list that macOS keeps current as apps launch and quit, with apps that have quit filtered out on every read. The list is only ever rebuilt on the main actor, because macOS updates its application list on the main run loop. A list more than a second old is rebuilt there before it is used, so cleanup waits while the main thread is busy and never works from a list more than a second old. Building the list from macOS for each file took about 18 ms per file in a real cleanup: 102 of 115 seconds for 5,663 files.
 
 Only allowlisted downloaded web resources such as JavaScript and images are eligible. Passwords, cookies, bookmarks and browsing history are excluded.
 
@@ -24,12 +24,12 @@ Trash and the journal cannot form a single atomic filesystem transaction. If the
 
 When the app opens it drops the records nothing can be restored from, then rewrites the event log in its shortest equivalent form. A record is dropped only on certainty:
 
-- Its Trash item is gone while the Trash folder that held it is present: emptied, put back in Finder or deleted. A missing or unreadable Trash folder (an unmounted volume, no permission) proves nothing, so the record stays.
-- Its move never happened: the record has no Trash location and the original is still the same file (same fingerprint) in place.
+- Its Trash item is gone while the Trash folder that held it is present, before and after the check, on the volume the file was on: emptied, put back in Finder or deleted. A Trash folder that is missing, unreadable or on another volume (an unmounted disk, no permission, something else mounted at that path) proves nothing, so the record stays.
+- Its move never happened: the record has no Trash location, is more than an hour old, and the original is still the same file (same fingerprint) in place. A newer record without a Trash location may belong to a move that is about to happen and stays.
 
-A record for an interrupted move whose original is gone stays, because Finder's Trash may still hold the file.
+A record for an interrupted move whose original is gone stays, because Finder's Trash may still hold the file. Each record is judged in the form the log holds at that moment, with the log locked, so a move that completed after an earlier read is judged as completed.
 
-Compaction writes one line per live record, plus one removal line for each legacy record that is gone; the legacy file is still never rewritten. The new log is written to a companion file, flushed, and renamed over the old one, so an interruption leaves one complete log or the other. Another journal instance that opened the old file reopens the new one before reading or appending. Tests and previews never run this step; only the app does, against its own journal.
+Compaction writes one line per live record, plus one removal line for each legacy record that is gone; the legacy file is still never rewritten. The new log is written to a companion file, flushed, and renamed over the old one, so an interruption leaves one complete log or the other. Another journal instance that opened the old file reopens the new one before reading or appending. The compacting instance remembers nothing about the new file, since its lock was on the old one, and reads it afresh on its next call. Tests and previews never run this step; only the app does, against its own journal.
 
 ## Background cleanup jobs
 

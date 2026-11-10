@@ -65,20 +65,32 @@ public struct TrashService: Sendable {
     /// then rewrites the event log without its superseded lines. Returns how many records were dropped.
     @discardableResult
     public func tidyHistory() throws -> Int {
-        let spent = Set(try history.records().filter(Self.isBeyondRecovery).map(\.id))
-        return try history.compact(dropping: spent)
+        try history.compact(where: { Self.isBeyondRecovery($0) })
     }
     /// True only when it is certain nothing can be restored from this record. Anything unclear keeps it.
-    static func isBeyondRecovery(_ record: TrashRecord) -> Bool {
-        var info = stat()
+    static func isBeyondRecovery(_ record: TrashRecord, now: Date = Date()) -> Bool {
         guard let trashed = record.trashed else {
-            // The move was interrupted. Nothing was moved if the original is still the same file in place.
+            // No Trash location: the move is in progress or was interrupted. A record this recent may
+            // belong to a move about to happen. An older one moved nothing if the original is still
+            // the same file in place.
+            guard now.timeIntervalSince(record.date) > 3600 else { return false }
             return (try? Fingerprint.read(record.original)) == record.fingerprint
         }
-        // The Trash folder is there and the item is not in it: emptied, put back or deleted. A Trash
-        // folder that is missing or unreadable (an unmounted volume, no permission) proves nothing.
-        guard lstat(trashed.deletingLastPathComponent().path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return false }
-        return lstat(trashed.path, &info) != 0 && errno == ENOENT
+        // The Trash folder is there, on the volume the file was on, and the item is not in it: emptied,
+        // put back or deleted. A Trash folder that is missing, unreadable or on another volume (an
+        // unmounted disk, no permission, something else mounted at that path) proves nothing.
+        func trashFolder() -> (device: UInt64, inode: UInt64)? {
+            var info = stat()
+            guard lstat(trashed.deletingLastPathComponent().path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+                  UInt64(truncatingIfNeeded: info.st_dev) == record.fingerprint.device else { return nil }
+            return (UInt64(truncatingIfNeeded: info.st_dev), UInt64(info.st_ino))
+        }
+        guard let before = trashFolder() else { return false }
+        var info = stat()
+        guard lstat(trashed.path, &info) != 0, errno == ENOENT else { return false }
+        // The same folder must still be there, or the answer may come from a volume that just went away.
+        guard let after = trashFolder() else { return false }
+        return after == before
     }
     /// Set around a cleanup so every file it moves is recorded against that job.
     @TaskLocal public static var cleanupJob: UUID?

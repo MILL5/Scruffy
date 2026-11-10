@@ -77,18 +77,21 @@ struct TrashJournal: Sendable {
         }
     }
 
-    /// Rewrites the event log in its shortest equivalent form and drops the records in `ids`.
-    /// Returns how many records were dropped. The legacy file is never rewritten: a legacy record
-    /// that is gone keeps one removal line. The new log is complete on disk before it replaces the
-    /// old one, so an interruption leaves one whole log or the other.
+    /// Rewrites the event log in its shortest equivalent form and drops the records in `ids` and
+    /// those `spent` accepts. Returns how many records were dropped. `spent` sees each record as the
+    /// log holds it at that moment, with the log locked, so a record completed since an earlier read
+    /// is judged in its completed form. The legacy file is never rewritten: a legacy record that is
+    /// gone keeps one removal line. The new log is complete on disk before it replaces the old one,
+    /// so an interruption leaves one whole log or the other.
     @discardableResult
-    func compact(dropping ids: Set<UUID> = []) throws -> Int {
+    func compact(dropping ids: Set<UUID> = [], where spent: ((TrashRecord) -> Bool)? = nil) throws -> Int {
         try state.lock.withLock {
             let legacy = try readLegacy()
             state.legacyChecked = true; state.legacyStamp = legacy.stamp
             let legacyIDs = Set(legacy.records.map(\.id))
             // Without a log there is nothing to shorten; one is needed only to drop a legacy record.
-            guard let fd = try openLockedEvents(create: !ids.isDisjoint(with: legacyIDs), operation: LOCK_EX) else { return 0 }
+            let legacyDrop = !ids.isDisjoint(with: legacyIDs) || spent.map { legacy.records.contains(where: $0) } == true
+            guard let fd = try openLockedEvents(create: legacyDrop, operation: LOCK_EX) else { return 0 }
             defer { close(fd) }
             let before = try checkedStamp(fd, path: eventsURL)
             var order = legacy.records.map(\.id), seen = legacyIDs
@@ -104,7 +107,10 @@ struct TrashJournal: Sendable {
                     if let id = event.id { records.removeValue(forKey: id); logged.remove(id) }
                 }
             }
-            let dropped = ids.filter { records.removeValue(forKey: $0) != nil }.count
+            var dropped = ids.filter { records.removeValue(forKey: $0) != nil }.count
+            if let spent {
+                for record in Array(records.values) where spent(record) { records.removeValue(forKey: record.id); dropped += 1 }
+            }
             let encoder = JSONEncoder()
             var compacted = Data()
             for record in legacy.records where records[record.id] == nil {
@@ -131,7 +137,9 @@ struct TrashJournal: Sendable {
             } catch { unlink(replacement.path); throw error }
             let folder = open(eventsURL.deletingLastPathComponent().path, O_RDONLY | O_CLOEXEC)
             if folder >= 0 { fsync(folder); close(folder) }
-            state.eventsStamp = try stampAt(eventsURL); state.committedEnd = Int64(compacted.count)
+            // The lock held here is on the replaced file. Another instance may already have appended to
+            // the new one, so nothing about it is remembered: the next call reads it afresh.
+            state.eventsStamp = nil; state.committedEnd = 0
             return dropped
         }
     }

@@ -260,6 +260,43 @@ final class TrashJournalTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try Data(contentsOf: fixture.events).filter { $0 == 0x0a }.count, 2)
     }
 
+    func testCompactionJudgesEachRecordAsTheLogHoldsItUnderTheLock() throws {
+        let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
+        let journal = fixture.journal
+        let pending = record("pending"), finished = record("finished")
+        try journal.append(pending)
+        try journal.append(finished)
+        // A reader took its copy here, while both were still intent-only. Then one move completed.
+        let stale = try journal.records()
+        var moved = finished; moved.trashed = URL(fileURLWithPath: "/fixture/.Trash/finished")
+        try journal.append(moved)
+        XCTAssertEqual(stale.filter { $0.trashed == nil }.count, 2)
+
+        XCTAssertEqual(try journal.compact(where: { $0.trashed == nil }), 1)
+
+        let left = try journal.records()
+        XCTAssertEqual(left.map(\.id), [finished.id])
+        XCTAssertNotNil(left.first?.trashed)
+        // A move that completes after its intent was dropped still ends with its full record.
+        var later = pending; later.trashed = URL(fileURLWithPath: "/fixture/.Trash/pending")
+        try journal.append(later)
+        XCTAssertEqual(try journal.records().map(\.id), [finished.id, pending.id])
+    }
+
+    func testAnotherInstanceAppendingRightAfterCompactionIsNeverTruncatedAway() throws {
+        let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
+        let compacting = fixture.journal, other = fixture.journal
+        let first = record("first", trashed: true)
+        try compacting.append(first); try compacting.append(first)
+        XCTAssertEqual(try compacting.compact(), 0)
+        let second = record("second", trashed: true), third = record("third", trashed: true)
+        try other.append(second)
+        try compacting.append(third)
+        XCTAssertEqual(try fixture.journal.records().map(\.id), [first.id, second.id, third.id])
+        try compacting.remove(first.id)
+        XCTAssertEqual(try other.records().map(\.id), [second.id, third.id])
+    }
+
     func testLegacyOnlyHistoryGetsALogOnlyWhenARecordIsDropped() throws {
         let fixture = Fixture(); try fixture.prepare(); defer { fixture.cleanup() }
         let first = record("first", trashed: true), second = record("second", trashed: true)

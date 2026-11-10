@@ -98,7 +98,7 @@ final class AppModel: ObservableObject {
         trash = service; scanner = service.scanner; loadsHistory = loadHistory; self.settings = settings
         self.cleanupRunner = cleanupRunner ?? { selected, all, folders, progress in
             try await service.clean(selected, all: all, folders: folders,
-                                    browsersRunning: { AppModel.browsersRunning() }, progress: progress)
+                                    browsersRunning: { await AppModel.browsersRunning() }, progress: progress)
         }
         let url = jobHistoryURL ?? (loadHistory ? service.scanner.home.appendingPathComponent("Library/Application Support/Scruffy/cleanup-jobs.json") : nil)
         jobStore = url.map(CleanupJobStore.init)
@@ -444,12 +444,12 @@ final class AppModel: ObservableObject {
             bundleIdentifier == $0 || bundleIdentifier.hasPrefix($0 + ".")
         }
     }
-    nonisolated static func runningBrowsers() -> [NSRunningApplication] { RunningBrowserMonitor.shared.running }
+    static func runningBrowsers() -> [NSRunningApplication] { RunningBrowserMonitor.shared.refresh().filter { !$0.isTerminated } }
     nonisolated static func isRunningBrowser(bundleIdentifier: String, isRegularApplication: Bool, isTerminated: Bool) -> Bool {
         isRegularApplication && !isTerminated && !bundleIdentifier.lowercased().contains(".helper")
             && isSupportedBrowser(bundleIdentifier)
     }
-    nonisolated static func browsersRunning() -> Bool { !runningBrowsers().isEmpty }
+    nonisolated static func browsersRunning() async -> Bool { !(await RunningBrowserMonitor.shared.running()).isEmpty }
     var browserCleanupBlocked: Bool {
         !runningBrowserNames.isEmpty && chosen.contains { $0.category == .browsers }
     }
@@ -627,24 +627,36 @@ final class RunningBrowserMonitor: @unchecked Sendable {
     static let shared = RunningBrowserMonitor()
     private let lock = NSLock()
     private var browsers: [NSRunningApplication] = []
-    private var refreshed = ContinuousClock.now
+    private var refreshed: ContinuousClock.Instant?
     private var observation: NSKeyValueObservation?
-    private init() {
-        refresh()
-        observation = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in self?.refresh() }
-    }
-    private func refresh() {
+    private init() {}
+    /// Rebuilds the list. Main actor only: macOS updates its application list on the main run loop,
+    /// so a rebuild anywhere else could read a list that has stopped changing.
+    @MainActor @discardableResult
+    func refresh() -> [NSRunningApplication] {
+        if observation == nil {
+            observation = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in
+                Task { @MainActor in self?.refresh() }
+            }
+        }
         let found = NSWorkspace.shared.runningApplications.filter {
             AppModel.isRunningBrowser(bundleIdentifier: $0.bundleIdentifier ?? "", isRegularApplication: $0.activationPolicy == .regular,
                                       isTerminated: $0.isTerminated)
         }
         lock.withLock { browsers = found; refreshed = .now }
+        return found
     }
-    /// A browser that has quit drops out at once. A launch appears when macOS reports it; the list
-    /// is also rebuilt when it is more than a second old, in case a report never arrives.
-    var running: [NSRunningApplication] {
-        if lock.withLock({ refreshed.duration(to: .now) > .seconds(1) }) { refresh() }
-        return lock.withLock { browsers }.filter { !$0.isTerminated }
+    /// For callers off the main actor. A list rebuilt within the last second is used as it is, minus
+    /// apps that have quit since. An older one is rebuilt on the main actor first, so cleanup waits
+    /// when the main thread is busy and never works from a list more than a second old.
+    func running() async -> [NSRunningApplication] {
+        let recent: [NSRunningApplication]? = lock.withLock {
+            guard let refreshed, refreshed.duration(to: .now) <= .seconds(1) else { return nil }
+            return browsers
+        }
+        let list: [NSRunningApplication]
+        if let recent { list = recent } else { list = await refresh() }
+        return list.filter { !$0.isTerminated }
     }
 }
 

@@ -191,10 +191,14 @@ final class KeepOriginalAndSettingsTests: XCTestCase, @unchecked Sendable {
         for folder in [home, trash] { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
         let journalURL = root.appendingPathComponent("support/trash-history.json")
         let service = TrashService(scanner: CleanupScanner(home: home, temp: root.appendingPathComponent("temp")), journal: journalURL)
-        let fingerprint = Fingerprint(size: 1, modified: Date(timeIntervalSince1970: 0), device: 1, inode: 1, links: 1)
+        // The file was on the Trash folder's volume and is no longer in that folder.
+        let gone = trash.appendingPathComponent("gone.txt")
+        try Data("x".utf8).write(to: gone)
+        let fingerprint = try Fingerprint.read(gone)
+        try FileManager.default.removeItem(at: gone)
         let journal = TrashJournal(url: journalURL)
         try journal.append(TrashRecord(id: UUID(), original: home.appendingPathComponent("gone.txt"),
-                                       trashed: trash.appendingPathComponent("gone.txt"), fingerprint: fingerprint, date: Date()))
+                                       trashed: gone, fingerprint: fingerprint, date: Date()))
         // A model that does not load history never tidies it.
         await AppModel(loadHistory: false, trashService: service).tidyRecoveryHistory()
         XCTAssertEqual(try service.records().count, 1)
