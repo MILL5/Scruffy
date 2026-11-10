@@ -5,7 +5,9 @@ import CleanupCore
 @MainActor
 final class AppModel: ObservableObject {
     typealias CleanupRunner = @Sendable ([Candidate], [Candidate], [URL], @escaping @Sendable (CleanupProgress) -> Void) async throws -> CleanupOutcome
-    @Published var options = ScanOptions(folders: [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")])
+    @Published var options = ScanOptions(folders: [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")]) {
+        didSet { saveOptions() }
+    }
     @Published var result: ScanResult? { didSet { updateSearchIndex(); refreshVisible(); refreshChosen() } }
     @Published private(set) var visible: [Candidate] = [] { didSet { refreshVisibleSelection() } }
     @Published private(set) var isFiltering = false
@@ -53,6 +55,8 @@ final class AppModel: ObservableObject {
         }
     }
     @Published var hasScanned = false
+    /// Folder the scan has been waiting on macOS to open for several seconds, usually behind a permission prompt.
+    @Published var scanWaitingOn: String?
     /// Phase durations of the last completed scan. Shown as a tooltip on the status line.
     @Published private(set) var scanTimings: PhaseTimings?
     @Published private(set) var runningBrowserNames: [String] = []
@@ -71,6 +75,11 @@ final class AppModel: ObservableObject {
     private(set) var latestScanSnapshot: ScanResult?
     private var scanGeneration = UUID()
     private var removedPaths = Set<String>()
+    /// Originals the user chose in place of the scan's pick: duplicate hash to file ID. A new scan clears it.
+    private var preferredOriginals: [String: String] = [:]
+    /// Where folders and scan choices are remembered between launches. Nil keeps them for this launch only.
+    private let settings: UserDefaults?
+    static let optionsKey = "scanOptions"
     private let loadsHistory: Bool
     private var historyTask: Task<Void, Never>?
     private var historyGeneration = UUID()
@@ -81,18 +90,44 @@ final class AppModel: ObservableObject {
     private var pendingJobSave = false
     private var jobHistoryWritable = true
     private var jobRevision = 0
-    let scanner = CleanupScanner()
+    let scanner: CleanupScanner
     let trash: TrashService
-    init(loadHistory: Bool = true, cleanupRunner: CleanupRunner? = nil, jobHistoryURL: URL? = nil) {
-        let service = TrashService()
-        trash = service; loadsHistory = loadHistory
+    init(loadHistory: Bool = true, cleanupRunner: CleanupRunner? = nil, jobHistoryURL: URL? = nil, settings: UserDefaults? = nil,
+         trashService: TrashService? = nil) {
+        let service = trashService ?? TrashService()
+        trash = service; scanner = service.scanner; loadsHistory = loadHistory; self.settings = settings
         self.cleanupRunner = cleanupRunner ?? { selected, all, folders, progress in
             try await service.clean(selected, all: all, folders: folders,
                                     browsersRunning: { await AppModel.browsersRunning() }, progress: progress)
         }
         let url = jobHistoryURL ?? (loadHistory ? service.scanner.home.appendingPathComponent("Library/Application Support/Scruffy/cleanup-jobs.json") : nil)
         jobStore = url.map(CleanupJobStore.init)
+        if let settings, let saved = Self.savedOptions(in: settings, scanner: scanner) { options = saved }
         refreshHistory(); loadCleanupJobs()
+    }
+    /// A folder Scruffy may scan: an existing local folder in the home folder, outside Library and protected places.
+    static func canScan(_ folder: URL, scanner: CleanupScanner) -> Bool {
+        scanner.allowed(folder) && !scanner.isInLibrary(folder)
+    }
+    /// Saved folders are checked again: one that has since been removed, replaced by a link or protected is left out.
+    static func savedOptions(in settings: UserDefaults, scanner: CleanupScanner) -> ScanOptions? {
+        guard let saved = settings.dictionary(forKey: optionsKey) else { return nil }
+        var options = ScanOptions(folders: (saved["folders"] as? [String] ?? [])
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }.filter { canScan($0, scanner: scanner) })
+        options.duplicates = saved["duplicates"] as? Bool ?? true
+        options.downloads = saved["downloads"] as? Bool ?? true
+        options.browsers = saved["browsers"] as? Bool ?? true
+        options.caches = saved["caches"] as? Bool ?? true
+        options.temporary = saved["temporary"] as? Bool ?? true
+        options.large = saved["large"] as? Bool ?? true
+        options.videos = saved["videos"] as? Bool ?? true
+        return options
+    }
+    private func saveOptions() {
+        settings?.set(["folders": options.folders.map(\.path), "duplicates": options.duplicates,
+                       "downloads": options.downloads, "browsers": options.browsers, "caches": options.caches,
+                       "temporary": options.temporary, "large": options.large, "videos": options.videos],
+                      forKey: Self.optionsKey)
     }
     func isQueued(_ item: Candidate) -> Bool {
         activeCleanupPaths.contains(item.id) || activeCleanupCategories.contains(item.category)
@@ -171,6 +206,28 @@ final class AppModel: ObservableObject {
         else { selection.remove(item.id) }
     }
     func toggleSelection(_ item: Candidate) { advanceSelection(item) }
+    /// A copy can take over as its group's protected original unless that group is being cleaned.
+    func canKeepInstead(_ item: Candidate) -> Bool {
+        guard !isFiltering, item.duplicateHash != nil, let current = result?.filesByID[item.id] else { return false }
+        return !current.keeper && current.duplicateHash == item.duplicateHash
+            && current.fingerprint == item.fingerprint && !isQueued(current)
+    }
+    /// Protects this copy and offers the previous original for review like any other copy.
+    /// Cleanup verifies every copy against whichever file is protected at that time.
+    func keepInstead(_ item: Candidate) async {
+        guard let hash = item.duplicateHash else { return }
+        // Scan progress or a finished job can overtake this publication. The choice is recorded only
+        // together with the results that show it, so repeat until it is shown or no longer applies.
+        while canKeepInstead(item), !Task.isCancelled, let current = latestScanSnapshot ?? result {
+            if await publish(current, final: true, recordsSource: false, keeping: (hash, item.id)) { return }
+        }
+    }
+    /// Locations macOS refused to list in the current results.
+    var permissionDeniedCount: Int { result?.permissionDeniedCount ?? 0 }
+    func openFullDiskAccessSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
+        NSWorkspace.shared.open(url)
+    }
     var candidateBytes: Int64 { result?.candidateBytes ?? 0 }
     var summaryBytes: Int64 { activeCategory.map { bytes($0) } ?? candidateBytes }
     var summarySelectedCount: Int { activeCategory.map { selectedCategoryCounts[$0] ?? 0 } ?? chosen.count }
@@ -243,6 +300,14 @@ final class AppModel: ObservableObject {
             historySearch = search; visibleHistory = found
         }
     }
+    /// Clears recovery entries that can no longer be used and shortens the journal file.
+    /// Only the app calls this, once at launch, so tests and previews never alter a real journal.
+    func tidyRecoveryHistory() async {
+        guard loadsHistory, !busy else { return }
+        let store = trash
+        let dropped = await Task.detached(priority: .utility) { try? store.tidyHistory() }.value
+        if let dropped, dropped > 0 { refreshHistory() }
+    }
     func refreshHistory() {
         guard loadsHistory else { return }
         historyTask?.cancel()
@@ -266,17 +331,27 @@ final class AppModel: ObservableObject {
         guard !busy else { return }
         let snapshot = options
         let generation = UUID()
-        scanGeneration = generation; removedPaths = []; publishedSnapshotID = nil; latestScanSnapshot = nil
+        scanGeneration = generation; removedPaths = []; preferredOriginals = [:]; publishedSnapshotID = nil; latestScanSnapshot = nil
         isScanning = true; selection = []; result = nil; status = "Scanning local files…"; error = nil
         scanTimings = nil
         task = Task {
             let (updates, continuation) = AsyncStream.makeStream(of: (ScanResult, String).self, bufferingPolicy: .bufferingNewest(1))
+            let activity = ScanActivity(), scanner = scanner
             let work = Task.detached(priority: .userInitiated) {
                 defer { continuation.finish() }
-                return try CleanupScanner().scan(snapshot, progress: { partial, progress in
+                return try scanner.scan(snapshot, activity: activity, progress: { partial, progress in
                     continuation.yield((partial, progress))
                 })
             }
+            // Progress stops arriving while the scan waits on macOS, so the wait is watched from here.
+            let watch = Task {
+                while !Task.isCancelled, scanGeneration == generation {
+                    let waiting = activity.waiting(atLeast: .seconds(4))
+                    if waiting != scanWaitingOn { scanWaitingOn = waiting }
+                    do { try await Task.sleep(for: .seconds(1)) } catch { break }
+                }
+            }
+            defer { watch.cancel(); if scanGeneration == generation { scanWaitingOn = nil } }
             do {
                 let found = try await withTaskCancellationHandler(operation: {
                     for await (partial, progress) in updates {
@@ -290,28 +365,37 @@ final class AppModel: ObservableObject {
                 await publish(found, final: true); hasScanned = true
                 scanTimings = found.timings
                 let took = found.timings?["Whole scan"].map { " · scan took \(PhaseTimings.format($0.seconds))" } ?? ""
-                if !isCleaning { status = "\(result?.categoryCounts.values.reduce(0, +) ?? 0) files ready to review · \(result?.videos.count ?? 0) videos available\(took)." }
-            } catch is CancellationError { if !isCleaning { status = "Scan stopped. Ready results are still available." } }
-            catch { self.error = error.localizedDescription; status = "Scan could not finish." }
+                if !isCleaning { status = "\(result?.categoryCounts.values.reduce(0, +) ?? 0) files ready to review across all categories · \(result?.videos.count ?? 0) videos available\(took)." }
+            } catch is CancellationError { if scanGeneration == generation, !isCleaning { status = "Scan stopped. Ready results are still available." } }
+            catch { if scanGeneration == generation { self.error = error.localizedDescription; status = "Scan could not finish." } }
             if scanGeneration == generation { isScanning = false }
         }
     }
-    func publish(_ found: ScanResult, final: Bool = false, recordsSource: Bool = true) async {
-        guard final || publishedSnapshotID != found.id else { return }
+    /// Returns whether these results were shown. `keeping` makes one copy its group's protected original
+    /// (duplicate hash, file ID); it is recorded only if this publication is the one shown.
+    @discardableResult
+    func publish(_ found: ScanResult, final: Bool = false, recordsSource: Bool = true,
+                 keeping: (hash: String, id: String)? = nil) async -> Bool {
+        guard final || publishedSnapshotID != found.id else { return false }
         if recordsSource { latestScanSnapshot = found }
         let publication = UUID(), scan = scanGeneration
         publicationGeneration = publication
         let ready: ScanResult
-        if removedPaths.isEmpty { ready = found }
+        let removed = removedPaths
+        // A chosen original applies while it is still listed as part of that duplicate group.
+        var originals = preferredOriginals
+        if let keeping { originals[keeping.hash] = keeping.id }
+        let preferred = originals.filter { !removed.contains($0.value) && found.filesByID[$0.value]?.duplicateHash == $0.key }
+        if removed.isEmpty && preferred.isEmpty { ready = found }
         else {
-            let removed = removedPaths
             let work = Task.detached(priority: .userInitiated) {
                 var files: [Candidate] = []
                 files.reserveCapacity(found.files.count)
                 for start in stride(from: 0, to: found.files.count, by: 512) {
                     try Task.checkCancellation()
                     autoreleasepool {
-                        for item in found.files[start..<min(start + 512, found.files.count)] where !removed.contains(item.id) {
+                        for var item in found.files[start..<min(start + 512, found.files.count)] where !removed.contains(item.id) {
+                            if let hash = item.duplicateHash, let original = preferred[hash] { item.keeper = item.id == original }
                             files.append(item)
                         }
                     }
@@ -321,10 +405,11 @@ final class AppModel: ObservableObject {
             }
             do {
                 ready = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
-            } catch { return }
+            } catch { return false }
         }
-        guard publicationGeneration == publication, scanGeneration == scan, !Task.isCancelled else { return }
+        guard publicationGeneration == publication, scanGeneration == scan, !Task.isCancelled else { return false }
         publishedSnapshotID = found.id
+        if let keeping { preferredOriginals[keeping.hash] = keeping.id; selection.remove(keeping.id) }
         if !ready.files.isEmpty || !ready.videos.isEmpty || final { result = ready }
         if !selection.isEmpty {
             let whole = wholeGroups(in: ready, selection: selection)
@@ -333,6 +418,7 @@ final class AppModel: ObservableObject {
                 return !file.keeper || file.duplicateHash.map(whole.contains) == true
             }
         }
+        return true
     }
     func cancel() { task?.cancel() }
     func addFolder() {
@@ -341,7 +427,7 @@ final class AppModel: ObservableObject {
         panel.message = "Choose local personal folders. Cloud folders and protected locations are excluded."
         guard panel.runModal() == .OK else { return }
         for url in panel.urls {
-            guard scanner.allowed(url), !scanner.isWithin(url, scanner.home.appendingPathComponent("Library")) else {
+            guard Self.canScan(url, scanner: scanner) else {
                 error = "This location is protected or outside your home folder: \(url.path)"; continue
             }
             if !options.folders.contains(url) { options.folders.append(url) }
@@ -349,27 +435,21 @@ final class AppModel: ObservableObject {
         invalidate()
     }
     func invalidate() {
-        task?.cancel(); scanGeneration = UUID(); isScanning = false
-        result = nil; selection = []; hasScanned = false; removedPaths = []; publishedSnapshotID = nil; latestScanSnapshot = nil
+        task?.cancel(); scanGeneration = UUID(); isScanning = false; scanWaitingOn = nil
+        result = nil; selection = []; hasScanned = false; removedPaths = []; preferredOriginals = [:]; publishedSnapshotID = nil; latestScanSnapshot = nil
         status = "Scan settings changed. Ready for a fresh look."
     }
-    static func isSupportedBrowser(_ bundleIdentifier: String) -> Bool {
+    nonisolated static func isSupportedBrowser(_ bundleIdentifier: String) -> Bool {
         ["com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "com.microsoft.edgemac", "com.brave.Browser", "company.thebrowser.Browser", "com.apple.SafariTechnologyPreview"].contains {
             bundleIdentifier == $0 || bundleIdentifier.hasPrefix($0 + ".")
         }
     }
-    static func runningBrowsers() -> [NSRunningApplication] {
-        NSWorkspace.shared.runningApplications.filter {
-            let id = $0.bundleIdentifier ?? ""
-            return isRunningBrowser(bundleIdentifier: id, isRegularApplication: $0.activationPolicy == .regular,
-                                    isTerminated: $0.isTerminated)
-        }
-    }
-    static func isRunningBrowser(bundleIdentifier: String, isRegularApplication: Bool, isTerminated: Bool) -> Bool {
+    static func runningBrowsers() -> [NSRunningApplication] { RunningBrowserMonitor.shared.refresh().filter { !$0.isTerminated } }
+    nonisolated static func isRunningBrowser(bundleIdentifier: String, isRegularApplication: Bool, isTerminated: Bool) -> Bool {
         isRegularApplication && !isTerminated && !bundleIdentifier.lowercased().contains(".helper")
             && isSupportedBrowser(bundleIdentifier)
     }
-    static func browsersRunning() -> Bool { !runningBrowsers().isEmpty }
+    nonisolated static func browsersRunning() async -> Bool { !(await RunningBrowserMonitor.shared.running()).isEmpty }
     var browserCleanupBlocked: Bool {
         !runningBrowserNames.isEmpty && chosen.contains { $0.category == .browsers }
     }
@@ -530,11 +610,57 @@ final class AppModel: ObservableObject {
         }
         refreshHistory()
     }
+    /// Puts one file back. Results on screen stay: the file left them when it was cleaned, and
+    /// every remaining file is checked again before any later cleanup.
     func restore(_ record: TrashRecord) {
-        do { try trash.restore(record); refreshHistory(); invalidate(); status = "Restored \(record.original.lastPathComponent)." }
-        catch { self.error = error.localizedDescription }
+        do {
+            try trash.restore(record); refreshHistory()
+            status = "Restored \(record.original.lastPathComponent). Scan again to see it listed."
+        } catch { self.error = error.localizedDescription }
     }
 }
+
+/// The supported browsers that are running, kept current as apps launch and quit.
+/// Cleanup asks before every browser-cache file. Building the list from macOS each time took
+/// about 18 ms per file in a real cleanup of 5,663 files: 102 of its 115 seconds.
+final class RunningBrowserMonitor: @unchecked Sendable {
+    static let shared = RunningBrowserMonitor()
+    private let lock = NSLock()
+    private var browsers: [NSRunningApplication] = []
+    private var refreshed: ContinuousClock.Instant?
+    private var observation: NSKeyValueObservation?
+    private init() {}
+    /// Rebuilds the list. Main actor only: macOS updates its application list on the main run loop,
+    /// so a rebuild anywhere else could read a list that has stopped changing.
+    @MainActor @discardableResult
+    func refresh() -> [NSRunningApplication] {
+        if observation == nil {
+            observation = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in
+                Task { @MainActor in self?.refresh() }
+            }
+        }
+        let found = NSWorkspace.shared.runningApplications.filter {
+            AppModel.isRunningBrowser(bundleIdentifier: $0.bundleIdentifier ?? "", isRegularApplication: $0.activationPolicy == .regular,
+                                      isTerminated: $0.isTerminated)
+        }
+        lock.withLock { browsers = found; refreshed = .now }
+        return found
+    }
+    /// For callers off the main actor. A list rebuilt within the last second is used as it is, minus
+    /// apps that have quit since. An older one is rebuilt on the main actor first, so cleanup waits
+    /// when the main thread is busy and never works from a list more than a second old.
+    func running() async -> [NSRunningApplication] {
+        let recent: [NSRunningApplication]? = lock.withLock {
+            guard let refreshed, refreshed.duration(to: .now) <= .seconds(1) else { return nil }
+            return browsers
+        }
+        let list: [NSRunningApplication]
+        if let recent { list = recent } else { list = await refresh() }
+        return list.filter { !$0.isTerminated }
+    }
+}
+
+func fileCount(_ count: Int) -> String { "\(count.formatted()) \(count == 1 ? "file" : "files")" }
 
 func formatBytes(_ bytes: Int64) -> String {
     let formatter = ByteCountFormatter()

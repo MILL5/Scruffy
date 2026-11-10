@@ -1,5 +1,11 @@
 # System purge and progressive scanning
 
+## When a scan waits on macOS
+
+macOS asks the user before an app may read Desktop, Documents, Downloads, removable volumes or network volumes. Until that prompt is answered, the call that opens the folder does not return. A probe app with no permissions, listing `~/Documents` and then `~/Desktop` exactly as the scanner does, sat in `-[NSURLDirectoryEnumerator nextObject]` → `_GetDirectoryURLs` → `__open` with zero entries returned until the prompt was answered; `tccd` logged the request and, 2.7 seconds later, the response. This is the "blocked inside Foundation directory enumeration" stall recorded on November 9. With permissions already granted, a metadata-only walk of the same home folder (359,618 files) finished in 87 seconds with no single listing call waiting 0.2 seconds.
+
+The app cannot answer or bypass the prompt, and macOS offers no way to ask whether one is showing. The scanner therefore records which folder it has asked macOS to list (`ScanActivity`), and the app checks that record once a second from the main actor, because the scan's own progress callback runs on the blocked thread. After about four seconds without an answer the footer says which folder Scruffy is waiting for and that a permission prompt may be behind the window. Cancel takes effect when the call returns. Locally built, ad-hoc signed copies are a new app to macOS after each rebuild, so the prompts return; a Developer ID build keeps its answers.
+
 ## Clean purgeable data
 
 The Purgeable Space panel offers an actionable **Clean purgeable data** control independent of Time Machine snapshots. It delegates to macOS CacheDelete, restricted to `com.apple.fspurgeable_data` and `com.apple.cache_delete_app_container_caches`. Cloud-document eviction, Time Machine, system-update snapshots and system assets are not in this allowlist. The separate Time Machine action remains explicitly reviewed and administrator-approved.

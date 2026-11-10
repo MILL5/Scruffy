@@ -352,53 +352,24 @@ private enum NativeVideo {
     private static func readAllSamples(_ asset: AVAsset, tracks: [AVAssetTrack]) async throws {
         let reader = try AVAssetReader(asset: asset)
         let outputs = tracks.map { AVAssetReaderTrackOutput(track: $0, outputSettings: nil) }
-        #if compiler(>=6.2)
-        if #available(macOS 26, *) {
-            let providers = outputs.map { reader.outputProvider(for: $0) }
-            try reader.start()
-            for provider in providers {
-                var count = 0
-                while let sample = try await provider.next() {
-                    try Task.checkCancellation()
-                    // Valid marker buffers describe edits/boundaries, not media.
-                    if sample.contentType == .markerOnly { continue }
-                    guard sample.sampleCount > 0 else { throw VideoCompressionError.invalidOutput("An empty media sample was returned.") }
-                    count += 1
-                }
-                guard count > 0 else { throw VideoCompressionError.invalidOutput("An output track contains no readable samples.") }
-            }
-        } else { try readLegacySamples(reader, outputs: outputs) }
-        #else
-        try readLegacySamples(reader, outputs: outputs)
-        #endif
-        guard reader.status == .completed else { throw VideoCompressionError.invalidOutput(reader.error?.localizedDescription ?? "The output could not be read to completion.") }
-    }
-
-    @available(macOS, introduced: 14, obsoleted: 26)
-    private static func readLegacySamples(_ reader: AVAssetReader, outputs: [AVAssetReaderTrackOutput]) throws {
-        for output in outputs { reader.add(output) }
-        guard reader.startReading() else { throw VideoCompressionError.invalidOutput(reader.error?.localizedDescription ?? "The output could not be opened.") }
-        for output in outputs {
+        let providers = outputs.map { reader.outputProvider(for: $0) }
+        try reader.start()
+        for provider in providers {
             var count = 0
-            while try autoreleasepool(invoking: {
+            while let sample = try await provider.next() {
                 try Task.checkCancellation()
-                guard let sample = output.copyNextSampleBuffer() else { return false }
-                guard CMSampleBufferIsValid(sample) else {
-                    throw VideoCompressionError.invalidOutput("An invalid output sample was returned.")
-                }
-                if CMSampleBufferGetNumSamples(sample) == 0, CMSampleBufferGetDataBuffer(sample) == nil,
-                   CMSampleBufferGetImageBuffer(sample) == nil { return true }
-                guard CMSampleBufferGetNumSamples(sample) > 0 else { throw VideoCompressionError.invalidOutput("An empty media sample was returned.") }
+                // Valid marker buffers describe edits/boundaries, not media.
+                if sample.contentType == .markerOnly { continue }
+                guard sample.sampleCount > 0 else { throw VideoCompressionError.invalidOutput("An empty media sample was returned.") }
                 count += 1
-                return true
-            }) { }
+            }
             guard count > 0 else { throw VideoCompressionError.invalidOutput("An output track contains no readable samples.") }
         }
+        guard reader.status == .completed else { throw VideoCompressionError.invalidOutput(reader.error?.localizedDescription ?? "The output could not be read to completion.") }
     }
 }
 
 private actor NativeVideoExporter {
-    private var activeSession: AVAssetExportSession?
     func export(source: URL, output: URL, progress: (@Sendable (Double) -> Void)?) async throws {
         let type: AVFileType
         switch source.pathExtension.lowercased() {
@@ -418,60 +389,15 @@ private actor NativeVideoExporter {
               let session = AVAssetExportSession(asset: asset, presetName: preset), session.supportedFileTypes.contains(type) else {
             throw VideoCompressionError.unsupported("High-quality HEVC cannot preserve this video’s existing file container on this Mac.")
         }
-        activeSession = session
         session.canPerformMultiplePassesOverSourceMediaData = true
         session.metadata = try await asset.load(.metadata)
-        let updates: Task<Void, Never>
-        if #available(macOS 15, *) {
-            let states = session.states(updateInterval: 0.25)
-            updates = Task {
-                for await state in states {
-                    if case .exporting(let status) = state { progress?(status.fractionCompleted) }
-                }
-            }
-        } else { updates = legacyProgress(progress: progress) }
-        defer { updates.cancel(); activeSession = nil }
-        if #available(macOS 15, *) { try await session.export(to: output, as: type) }
-        else { try await legacyExport(session, to: output, as: type) }
-    }
-
-    @available(macOS, introduced: 14, obsoleted: 15)
-    private func legacyExport(_ session: AVAssetExportSession, to output: URL, as type: AVFileType) async throws {
-        session.outputURL = output; session.outputFileType = type
-        let cancellation = LegacyVideoCancellation(session)
-        try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            await withCheckedContinuation { continuation in
-                session.exportAsynchronously { continuation.resume() }
-            }
-            switch session.status {
-            case .completed: break
-            case .cancelled: throw CancellationError()
-            default: throw session.error ?? VideoCompressionError.invalidOutput("The export did not complete.")
-            }
-        } onCancel: { cancellation.cancel() }
-    }
-
-    @available(macOS, introduced: 14, obsoleted: 15)
-    private func legacyProgress(progress: (@Sendable (Double) -> Void)?) -> Task<Void, Never> {
-        Task { [weak self] in
-            while !Task.isCancelled {
-                guard let value = await self?.legacyProgressValue() else { break }
-                progress?(value)
-                do { try await Task.sleep(for: .milliseconds(250)) } catch { break }
+        let states = session.states(updateInterval: 0.25)
+        let updates = Task {
+            for await state in states {
+                if case .exporting(let status) = state { progress?(status.fractionCompleted) }
             }
         }
+        defer { updates.cancel() }
+        try await session.export(to: output, as: type)
     }
-
-    @available(macOS, introduced: 14, obsoleted: 15)
-    private func legacyProgressValue() -> Double { Double(activeSession?.progress ?? 0) }
-}
-
-// AVFoundation explicitly permits cancelExport while an export is running. This
-// compatibility wrapper exposes only that operation to the cancellation handler.
-@available(macOS, introduced: 14, obsoleted: 15)
-private final class LegacyVideoCancellation: @unchecked Sendable {
-    private let session: AVAssetExportSession
-    init(_ session: AVAssetExportSession) { self.session = session }
-    func cancel() { session.cancelExport() }
 }

@@ -26,12 +26,11 @@ struct TrashJournal: Sendable {
             let legacy = try readLegacy()
             for record in legacy.records { apply(.upsert(record)) }
             state.legacyChecked = true; state.legacyStamp = legacy.stamp
-            guard let fd = try openEvents(create: false) else {
+            guard let fd = try openLockedEvents(create: false, operation: LOCK_SH) else {
                 state.eventsStamp = nil; state.committedEnd = 0
                 return order.compactMap { records[$0] }
             }
             defer { close(fd) }
-            try lock(fd, operation: LOCK_SH)
             let before = try checkedStamp(fd, path: eventsURL)
             let data = try readAll(fd)
             let end = try replay(data, apply: apply)
@@ -49,9 +48,8 @@ struct TrashJournal: Sendable {
         var line = try JSONEncoder().encode(event)
         line.append(0x0a)
         try state.lock.withLock {
-            guard let fd = try openEvents(create: true) else { throw Failure.changed(eventsURL.path) }
+            guard let fd = try openLockedEvents(create: true, operation: LOCK_EX) else { throw Failure.changed(eventsURL.path) }
             defer { close(fd) }
-            try lock(fd, operation: LOCK_EX)
             var stamp = try checkedStamp(fd, path: eventsURL)
             // Retain one helper for a batch: known own appends need only stat checks.
             // Unexpected external changes are fully revalidated under the file lock.
@@ -77,6 +75,89 @@ struct TrashJournal: Sendable {
             guard stamp.size == committedEnd + Int64(line.count) else { throw Failure.changed(eventsURL.path) }
             state.eventsStamp = stamp; state.committedEnd = stamp.size
         }
+    }
+
+    /// Rewrites the event log in its shortest equivalent form and drops the records in `ids` and
+    /// those `spent` accepts. Returns how many records were dropped. `spent` sees each record as the
+    /// log holds it at that moment, with the log locked, so a record completed since an earlier read
+    /// is judged in its completed form. The legacy file is never rewritten: a legacy record that is
+    /// gone keeps one removal line. The new log is complete on disk before it replaces the old one,
+    /// so an interruption leaves one whole log or the other.
+    @discardableResult
+    func compact(dropping ids: Set<UUID> = [], where spent: ((TrashRecord) -> Bool)? = nil) throws -> Int {
+        try state.lock.withLock {
+            let legacy = try readLegacy()
+            state.legacyChecked = true; state.legacyStamp = legacy.stamp
+            let legacyIDs = Set(legacy.records.map(\.id))
+            // Without a log there is nothing to shorten; one is needed only to drop a legacy record.
+            let legacyDrop = !ids.isDisjoint(with: legacyIDs) || spent.map { legacy.records.contains(where: $0) } == true
+            guard let fd = try openLockedEvents(create: legacyDrop, operation: LOCK_EX) else { return 0 }
+            defer { close(fd) }
+            let before = try checkedStamp(fd, path: eventsURL)
+            var order = legacy.records.map(\.id), seen = legacyIDs
+            var records = Dictionary(legacy.records.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+            var logged = Set<UUID>()
+            let end = try replay(readAll(fd)) { event in
+                switch event.operation {
+                case .upsert:
+                    guard let record = event.record else { return }
+                    if seen.insert(record.id).inserted { order.append(record.id) }
+                    records[record.id] = record; logged.insert(record.id)
+                case .remove:
+                    if let id = event.id { records.removeValue(forKey: id); logged.remove(id) }
+                }
+            }
+            var dropped = ids.filter { records.removeValue(forKey: $0) != nil }.count
+            if let spent {
+                for record in Array(records.values) where spent(record) { records.removeValue(forKey: record.id); dropped += 1 }
+            }
+            let encoder = JSONEncoder()
+            var compacted = Data()
+            for record in legacy.records where records[record.id] == nil {
+                compacted.append(try encoder.encode(Event.remove(record.id))); compacted.append(0x0a)
+            }
+            for id in order where logged.contains(id) {
+                guard let record = records[id] else { continue }
+                compacted.append(try encoder.encode(Event.upsert(record))); compacted.append(0x0a)
+            }
+            guard dropped > 0 || Int64(compacted.count) < before.size else {
+                state.eventsStamp = before; state.committedEnd = end
+                return 0
+            }
+            let replacement = eventsURL.appendingPathExtension("compacting")
+            unlink(replacement.path)   // Left behind only by an interrupted earlier run.
+            let out = open(replacement.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            guard out >= 0 else { throw posixError() }
+            do {
+                defer { close(out) }
+                try writeAll(compacted, fd: out)
+                while fsync(out) != 0 { if errno != EINTR { throw posixError() } }
+                guard try checkedStamp(fd, path: eventsURL) == before else { throw Failure.changed(eventsURL.path) }
+                guard rename(replacement.path, eventsURL.path) == 0 else { throw posixError() }
+            } catch { unlink(replacement.path); throw error }
+            let folder = open(eventsURL.deletingLastPathComponent().path, O_RDONLY | O_CLOEXEC)
+            if folder >= 0 { fsync(folder); close(folder) }
+            // The lock held here is on the replaced file. Another instance may already have appended to
+            // the new one, so nothing about it is remembered: the next call reads it afresh.
+            state.eventsStamp = nil; state.committedEnd = 0
+            return dropped
+        }
+    }
+
+    /// Opens and locks the log. Compaction replaces the log file, so a descriptor opened just before
+    /// one finished refers to the replaced file: open the current one instead of using it.
+    private func openLockedEvents(create: Bool, operation: Int32) throws -> Int32? {
+        for _ in 0..<8 {
+            guard let fd = try openEvents(create: create) else { return nil }
+            do {
+                try lock(fd, operation: operation)
+                var held = stat(), current = stat()
+                guard fstat(fd, &held) == 0 else { throw posixError() }
+                if lstat(eventsURL.path, &current) == 0, held.st_ino == current.st_ino, held.st_dev == current.st_dev { return fd }
+                close(fd)
+            } catch { close(fd); throw error }
+        }
+        throw Failure.changed(eventsURL.path)
     }
 
     private func openEvents(create: Bool) throws -> Int32? {

@@ -29,7 +29,7 @@ public enum CleanupCategory: String, CaseIterable, Sendable, Identifiable {
         case .browsers: "Downloaded web resources such as JavaScript and images only. Saved passwords, cookies, bookmarks and browsing history stay untouched. Any running browsers must close before cleanup."
         case .caches: "pip, uv and npm download caches. Recreated as needed; future installs may require a download. Quit package managers first."
         case .temporary: "Regular files untouched for at least seven days in your user temporary folder. Quit active apps and review before selecting."
-        case .large: "Files over 500 MB in your chosen folders. These may be valuable personal files; nothing is selected automatically."
+        case .large: "Files of 500 MB or more in your chosen folders. These may be valuable personal files; nothing is selected automatically."
         case .videos: "Compress videos at high quality while preserving their resolution and file format. Verified smaller replacements keep the originals in Trash."
         }
     }
@@ -48,7 +48,7 @@ public struct Fingerprint: Sendable, Equatable, Codable {
               (info.st_mode & S_IFMT) == S_IFREG else { throw SafetyError.unsafe(url.path) }
         return .init(size: Int64(info.st_size),
                      modified: Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9),
-                     device: UInt64(info.st_dev), inode: UInt64(info.st_ino), links: UInt64(info.st_nlink))
+                     device: UInt64(truncatingIfNeeded: info.st_dev), inode: UInt64(info.st_ino), links: UInt64(info.st_nlink))
     }
 }
 
@@ -99,6 +99,8 @@ public struct ScanResult: Sendable {
     public let filesByCategory: [CleanupCategory: [Candidate]]
     /// Set only on the result a completed scan returns.
     public internal(set) var timings: PhaseTimings?
+    /// Locations macOS refused to list. Full Disk Access is what allows the protected ones.
+    public var permissionDeniedCount: Int { notes.count { $0.hasPrefix(CleanupScanner.permissionNotePrefix) } }
     public init(files: [Candidate], notes: [String], videos: [Candidate] = []) {
         self.files = files; self.notes = notes
         var alreadySorted = true
@@ -132,6 +134,22 @@ public struct ScanResult: Sendable {
     }
 }
 
+/// What a running scan is waiting on, readable from another thread. The scan cannot report this
+/// itself: its progress callback runs on the thread that is waiting. macOS holds a folder listing
+/// open-ended while it asks the user for permission to read that folder.
+public final class ScanActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var folder: String?
+    private var since = ContinuousClock.now
+    public init() {}
+    func willList(_ path: String) { lock.withLock { folder = path; since = .now } }
+    func didList() { lock.withLock { folder = nil } }
+    /// The folder macOS has been asked to list for at least `duration` without answering, if any.
+    public func waiting(atLeast duration: Duration) -> String? {
+        lock.withLock { folder.flatMap { since.duration(to: .now) >= duration ? $0 : nil } }
+    }
+}
+
 public enum SafetyError: LocalizedError {
     case unsafe(String), changed(String), keeper, browserRunning, cancelled
     public var errorDescription: String? {
@@ -148,21 +166,47 @@ public enum SafetyError: LocalizedError {
 public struct CleanupScanner: Sendable {
     public let home: URL
     public let temp: URL
+    /// Smallest size listed under Large files. Decimal, like the sizes the app displays.
+    public static let largeFileBytes: Int64 = 500_000_000
+    /// Starts the scan note for a location macOS refused to list.
+    public static let permissionNotePrefix = "No permission to read: "
+    // Path strings prepared once: the safety check runs for every file a scan meets.
+    private let homePath: String
+    private let tempPath: String
+    private let homePrefix: String
+    private let tempPrefix: String
+    private let homeDepth: Int
+    private let tempDepth: Int
+    private let libraryKey: String
+    private let downloadsPrefix: String
+    private let forbiddenPaths: [(path: String, prefix: String)]
+    private let cacheRoots: [URL]
+    private let browserRoots: [URL]
+    private let profileRoots: [URL]
     public init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
                 temp: URL = FileManager.default.temporaryDirectory) {
-        self.home = home.resolvingSymlinksInPath().standardizedFileURL
+        let home = home.resolvingSymlinksInPath().standardizedFileURL
+        self.home = home
         self.temp = temp.resolvingSymlinksInPath().standardizedFileURL
-    }
-    private var cacheRoots: [URL] {
-        ["Library/Caches/pip", "Library/Caches/uv", ".npm/_cacache"].map { home.appendingPathComponent($0) }
-    }
-    private var browserRoots: [URL] {
-        ["Library/Caches/com.apple.Safari", "Library/Caches/Google/Chrome",
-         "Library/Caches/Microsoft Edge", "Library/Caches/BraveSoftware", "Library/Caches/company.thebrowser.Browser"].map { home.appendingPathComponent($0) }
-    }
-    private var profileRoots: [URL] {
-        ["Library/Application Support/Google/Chrome", "Library/Application Support/Microsoft Edge",
-         "Library/Application Support/BraveSoftware/Brave-Browser", "Library/Application Support/Arc/User Data"].map { home.appendingPathComponent($0) }
+        let homePath = home.path
+        self.homePath = homePath
+        tempPath = self.temp.path
+        homePrefix = homePath + "/"
+        tempPrefix = tempPath + "/"
+        homeDepth = Self.depth(homePath)
+        tempDepth = Self.depth(tempPath)
+        libraryKey = Self.locationKey(homePath + "/Library/")
+        downloadsPrefix = homePath + "/Downloads/"
+        forbiddenPaths = [".Trash", "Library/CloudStorage", "Library/Mobile Documents", "Library/Mail",
+                          "Library/Messages", "Library/Keychains", "Library/Photos", "Library/Containers",
+                          "Library/Group Containers", "Library/Developer", ".ssh", ".gnupg"].map {
+            (path: Self.locationKey(homePath + "/" + $0), prefix: Self.locationKey(homePath + "/" + $0 + "/"))
+        }
+        cacheRoots = ["Library/Caches/pip", "Library/Caches/uv", ".npm/_cacache"].map { home.appendingPathComponent($0) }
+        browserRoots = ["Library/Caches/com.apple.Safari", "Library/Caches/Google/Chrome",
+                        "Library/Caches/Microsoft Edge", "Library/Caches/BraveSoftware", "Library/Caches/company.thebrowser.Browser"].map { home.appendingPathComponent($0) }
+        profileRoots = ["Library/Application Support/Google/Chrome", "Library/Application Support/Microsoft Edge",
+                        "Library/Application Support/BraveSoftware/Brave-Browser", "Library/Application Support/Arc/User Data"].map { home.appendingPathComponent($0) }
     }
     public func isWithin(_ url: URL, _ parent: URL) -> Bool {
         let path = url.standardizedFileURL.path
@@ -172,11 +216,23 @@ public struct CleanupScanner: Sendable {
     private struct DirectoryIdentity: Equatable {
         let device: UInt64
         let inode: UInt64
-        static func read(_ url: URL) -> Self? {
-            var info = stat()
-            guard lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { return nil }
-            return Self(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
-        }
+    }
+    private struct SafetyCache {
+        /// Folders already inspected, with the identity each had at that time.
+        var ancestors: [String: DirectoryIdentity] = [:]
+        /// Device of the home or temporary folder, once its volume is known to be local.
+        var rootDevices: [String: UInt64] = [:]
+    }
+    /// Files whose contents are not on this Mac: reading one would start a download.
+    static func isCloudPlaceholder(flags: UInt32) -> Bool { flags & UInt32(SF_DATALESS) != 0 }
+    private static let forbiddenNames: Set<String> = [".git", "node_modules", ".build", ".venv", "venv"]
+    static func isForbiddenName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return forbiddenNames.contains(lower)
+            || lower.contains("dropbox") || lower.contains("onedrive")
+            || lower.contains("google drive") || lower.contains("googledrive")
+            || lower.hasSuffix(".photoslibrary") || lower.hasSuffix(".photolibrary")
+            || lower.hasSuffix(".app") || lower.hasSuffix(".bundle") || lower.hasSuffix(".backupdb")
     }
     /// Files a browser is still writing, or left behind by an interrupted download.
     /// Chromium uses .crdownload, Firefox .part, Safari a .download package, Edge legacy .partial.
@@ -187,57 +243,84 @@ public struct CleanupScanner: Sendable {
                 || lower.hasSuffix(".download") || lower.hasSuffix(".partial")
         }
     }
+    // Exclusions compare bytes, not characters. Swift's `hasPrefix` and `lastIndex(of:)` work on whole
+    // characters, and a slash next to a combining mark is one character: the folder boundary there
+    // would go unseen and the folder would escape its checks.
+    /// One Unicode form for comparing locations. APFS treats both forms of a name as the same file.
+    private static func locationKey(_ path: String) -> String {
+        path.utf8.allSatisfy { $0 < 0x80 } ? path : path.decomposedStringWithCanonicalMapping
+    }
+    /// Number of folder levels: the home or temporary folder and everything in it sit at or below its depth.
+    private static func depth(_ path: String) -> Int { path.utf8.count { $0 == UInt8(ascii: "/") } }
+    private func inLibrary(_ path: String) -> Bool { Self.locationKey(path).utf8.starts(with: libraryKey.utf8) }
+    /// True for anything inside the home folder's Library.
+    public func isInLibrary(_ url: URL) -> Bool { inLibrary(url.standardizedFileURL.path) }
     public func allowed(_ url: URL) -> Bool {
-        var cache: [String: DirectoryIdentity] = [:]
-        return allowed(url, ancestorCache: &cache)
+        var cache = SafetyCache()
+        return allowed(url, cache: &cache)
     }
     // Only scanning shares this cache. Cleanup and content reads always start with
     // an empty cache so an ancestor replaced since inventory is rejected.
-    private func allowed(_ url: URL, ancestorCache: inout [String: DirectoryIdentity]) -> Bool {
-        let path = url.standardizedFileURL
-        guard isWithin(path, home) || isWithin(path, temp) else { return false }
-        guard let volume = try? path.resourceValues(forKeys: [.volumeIsLocalKey]),
-              volume.volumeIsLocal == true else { return false }
-        let forbidden = [".Trash", "Library/CloudStorage", "Library/Mobile Documents", "Library/Mail",
-                         "Library/Messages", "Library/Keychains", "Library/Photos", "Library/Containers",
-                         "Library/Group Containers", "Library/Developer", ".ssh", ".gnupg"]
-        for relative in forbidden {
-            let root = home.appendingPathComponent(relative)
-            if path == root || isWithin(path, root) { return false }
+    private func allowed(_ url: URL, cache: inout SafetyCache) -> Bool {
+        let item = url.standardizedFileURL
+        let path = item.path
+        let root: String, rootDepth: Int
+        if path.hasPrefix(homePrefix) { root = homePath; rootDepth = homeDepth }
+        else if path.hasPrefix(tempPrefix) { root = tempPath; rootDepth = tempDepth }
+        else { return false }
+        // Only the volume holding the home or temporary folder is eligible. A disk image,
+        // external disk or network share mounted inside it is a different device.
+        let rootDevice: UInt64
+        if let known = cache.rootDevices[root] { rootDevice = known }
+        else {
+            var info = stat()
+            guard lstat(root, &info) == 0,
+                  let volume = try? URL(fileURLWithPath: root).resourceValues(forKeys: [.volumeIsLocalKey]),
+                  volume.volumeIsLocal == true else { return false }
+            rootDevice = UInt64(truncatingIfNeeded: info.st_dev)
+            cache.rootDevices[root] = rootDevice
         }
-        let components = path.pathComponents
-        if components.contains(where: {
-            let lower = $0.lowercased()
-            return [".git", "node_modules", ".build", ".venv", "venv"].contains(lower)
-                || lower.contains("dropbox") || lower.contains("onedrive")
-                || lower.contains("google drive") || lower.contains("googledrive")
-                || lower.hasSuffix(".photoslibrary") || lower.hasSuffix(".photolibrary")
-                || lower.hasSuffix(".app") || lower.hasSuffix(".bundle") || lower.hasSuffix(".backupdb")
-        }) { return false }
+        let key = Self.locationKey(path)
+        for forbidden in forbiddenPaths where key == forbidden.path || key.utf8.starts(with: forbidden.prefix.utf8) { return false }
         // Inspect every ancestor as well as the file; never follow a symlink into another tree.
         var cursor = path
-        var checked: [String] = []
-        while cursor.path != "/" {
-            if cursor != path, let identity = ancestorCache[cursor.path],
-               DirectoryIdentity.read(cursor) == identity {
-                break
-            }
+        var depth = Self.depth(path)
+        var checked: [(String, DirectoryIdentity)] = []
+        while cursor != "/" {
+            var info = stat()
+            let exists = lstat(cursor, &info) == 0
+            let kind = info.st_mode & S_IFMT
+            let identity = DirectoryIdentity(device: UInt64(truncatingIfNeeded: info.st_dev), inode: UInt64(info.st_ino))
+            if cursor != path, exists, kind == S_IFDIR, cache.ancestors[cursor] == identity { break }
             // Foundation canonicalizes /private/var back to macOS's root-owned /var alias.
             // Permit only that exact OS alias, never a user-created symlink.
-            if cursor.path == "/var",
+            if cursor == "/var",
                let target = try? FileManager.default.destinationOfSymbolicLink(atPath: "/var"),
-               target == "private/var" || target == "/private/var" {
-                cursor.deleteLastPathComponent()
-                continue
+               target == "private/var" || target == "/private/var" { break }
+            let bytes = cursor.utf8
+            let slash = bytes.lastIndex(of: UInt8(ascii: "/")) ?? bytes.startIndex
+            let name = String(decoding: bytes[bytes.index(after: slash)...], as: UTF8.self)
+            guard exists, kind != S_IFLNK, !Self.isForbiddenName(name) else { return false }
+            if depth >= rootDepth {
+                guard identity.device == rootDevice, !Self.isCloudPlaceholder(flags: info.st_flags) else { return false }
             }
-            guard let values = try? cursor.resourceValues(forKeys: [.isSymbolicLinkKey, .isAliasFileKey, .isUbiquitousItemKey]),
+            let location = cursor == path ? item : URL(fileURLWithPath: cursor)
+            guard let values = try? location.resourceValues(forKeys: [.isSymbolicLinkKey, .isAliasFileKey, .isUbiquitousItemKey]),
                   values.isSymbolicLink != true, values.isAliasFile != true,
                   values.isUbiquitousItem != true else { return false }
-            if cursor != path { checked.append(cursor.path) }
-            cursor.deleteLastPathComponent()
+            if cursor != path, kind == S_IFDIR { checked.append((cursor, identity)) }
+            cursor = slash == bytes.startIndex ? "/" : String(decoding: bytes[..<slash], as: UTF8.self)
+            depth -= 1
         }
-        for ancestor in checked { ancestorCache[ancestor] = DirectoryIdentity.read(URL(fileURLWithPath: ancestor)) }
+        for (ancestor, identity) in checked { cache.ancestors[ancestor] = identity }
         return true
+    }
+    /// macOS privacy protection and ordinary file permissions both report a read as not permitted.
+    static func isPermissionDenial(_ error: Error) -> Bool {
+        let error = error as NSError
+        if error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoPermissionError { return true }
+        let posix = error.domain == NSPOSIXErrorDomain ? error : error.userInfo[NSUnderlyingErrorKey] as? NSError
+        return posix?.domain == NSPOSIXErrorDomain && [Int(EPERM), Int(EACCES)].contains(posix?.code ?? 0)
     }
     private func browserAllowed(_ url: URL) -> Bool {
         if browserRoots.contains(where: { isWithin(url, $0) }) { return true }
@@ -261,8 +344,7 @@ public struct CleanupScanner: Sendable {
         case .caches: valid = cacheRoots.contains { isWithin(item.url, $0) }
         case .temporary: valid = isWithin(item.url, temp)
         case .downloads, .duplicates, .large, .videos:
-            valid = folders.contains { isWithin(item.url, $0) }
-                && !isWithin(item.url, home.appendingPathComponent("Library"))
+            valid = folders.contains { isWithin(item.url, $0) } && !isInLibrary(item.url)
         }
         guard valid else { throw SafetyError.unsafe(item.url.path) }
         guard try Fingerprint.read(item.url) == item.fingerprint else { throw SafetyError.changed(item.url.path) }
@@ -305,7 +387,7 @@ public struct CleanupScanner: Sendable {
     /// Progressive updates follow sidebar order and contain only ready-to-review files.
     /// Personal folders are enumerated once; later categories wait for their turn.
     /// The callback runs serially on the caller.
-    public func scan(_ options: ScanOptions,
+    public func scan(_ options: ScanOptions, activity: ScanActivity? = nil,
                      progress: (@Sendable (ScanResult, String) -> Void)? = nil) throws -> ScanResult {
         var items: [String: Candidate] = [:]
         var personalReady: [String: Candidate] = [:]
@@ -313,7 +395,7 @@ public struct CleanupScanner: Sendable {
         var ready: [String: Candidate] = [:]
         var videoReady: [String: Candidate] = [:]
         var notes = Set<String>()
-        var ancestorCache: [String: DirectoryIdentity] = [:]
+        var safetyCache = SafetyCache()
         var visited = Set<String>()
         var enumerated = 0
         var personalScanned = false
@@ -357,20 +439,27 @@ public struct CleanupScanner: Sendable {
         }
         func walk(_ root: URL, category: CleanupCategory?, age: TimeInterval = 0) throws {
             guard fm.fileExists(atPath: root.path) else { return }
-            guard allowed(root, ancestorCache: &ancestorCache) || root == home || (category == .temporary && root == temp) else {
+            guard allowed(root, cache: &safetyCache) || root == home || (category == .temporary && root == temp) else {
                 notes.insert("Skipped protected location: \(root.path)"); return
             }
-            guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .contentAccessDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { url, _ in
-                notes.insert("Could not read: \(url.path)"); return true
+            guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .contentAccessDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { url, error in
+                notes.insert((Self.isPermissionDenial(error) ? Self.permissionNotePrefix : "Could not read: ") + url.path); return true
             }) else { notes.insert("Could not open: \(root.path)"); return }
-            while let discovered = enumerator.nextObject() as? URL {
+            // The enumerator opens the folder it returned last. That call does not return while macOS
+            // waits for the user to answer a permission prompt for it.
+            var listing = root.path
+            while true {
+                activity?.willList(listing)
+                let next = enumerator.nextObject()
+                activity?.didList()
+                guard let discovered = next as? URL else { break }
                 let url = discovered.standardizedFileURL
                 try Task.checkCancellation()
                 let safetyStart = clock.now
-                let permitted = allowed(url, ancestorCache: &ancestorCache)
+                let permitted = allowed(url, cache: &safetyCache)
                 timings.add("Walk: safety check", since: safetyStart)
                 guard permitted else { enumerator.skipDescendants(); continue }
-                if category == nil && isWithin(url, home.appendingPathComponent("Library")) {
+                if category == nil && inLibrary(url.path) {
                     enumerator.skipDescendants(); continue
                 }
                 guard visited.insert(url.path).inserted else { enumerator.skipDescendants(); continue }
@@ -378,6 +467,7 @@ public struct CleanupScanner: Sendable {
                 let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isPackageKey, .contentAccessDateKey])
                 let fingerprint = values?.isRegularFile == true && values?.isPackage != true ? try? Fingerprint.read(url) : nil
                 timings.add("Walk: file metadata", since: metadataStart)
+                if values?.isRegularFile == false { listing = url.path }
                 guard let values, let fingerprint, fingerprint.links == 1, fingerprint.size > 0 else { continue }
                 // An unfinished download is never offered for cleanup, whatever its size or age.
                 if category == nil && Self.isPendingDownload(url) { pendingDownloads += 1; continue }
@@ -392,9 +482,9 @@ public struct CleanupScanner: Sendable {
                 if age > 0 && now.timeIntervalSince(lastUse) < age { continue }
                 let selectedCategory: CleanupCategory
                 if let category { selectedCategory = category }
-                else if options.downloads && isWithin(url, home.appendingPathComponent("Downloads")) && now.timeIntervalSince(lastUse) >= 30 * 86400 {
+                else if options.downloads && url.path.hasPrefix(downloadsPrefix) && now.timeIntervalSince(lastUse) >= 30 * 86400 {
                     selectedCategory = .downloads
-                } else if options.large && fingerprint.size >= 500 * 1024 * 1024 { selectedCategory = .large }
+                } else if options.large && fingerprint.size >= Self.largeFileBytes { selectedCategory = .large }
                 else if options.duplicates { selectedCategory = .duplicates }
                 else { continue }
                 let item = Candidate(url: url, category: selectedCategory, fingerprint: fingerprint)
@@ -475,7 +565,11 @@ public struct CleanupScanner: Sendable {
                             publish("Verifying duplicate contents")
                         }
                         for (hash, matches) in hashes where matches.count > 1 {
+                            // The protected original is a copy outside Downloads when there is one
+                            // (the filed copy, not the one that just arrived), then the oldest.
                             let sorted = matches.sorted {
+                                let left = $0.id.hasPrefix(downloadsPrefix), right = $1.id.hasPrefix(downloadsPrefix)
+                                if left != right { return right }
                                 if $0.fingerprint.modified == $1.fingerprint.modified { return $0.id < $1.id }
                                 return $0.fingerprint.modified < $1.fingerprint.modified
                             }
@@ -543,23 +637,31 @@ public struct CleanupScanner: Sendable {
         return finished
     }
 
-    // Validate the entire batch before moving any item. Called again for each item just before Trash.
     /// `wholeGroups` holds the hashes of duplicate groups the user chose in full, original included.
     /// Only those originals may be removed; every other original stays protected.
     public func validateSelection(_ selected: [Candidate], all: [Candidate], folders: [URL],
                                   wholeGroups: Set<String> = []) throws {
         let ids = Set(selected.map(\.id))
         for item in selected {
-            try validateLocation(item, folders: folders)
-            if item.keeper {
-                guard let hash = item.duplicateHash, wholeGroups.contains(hash) else { throw SafetyError.keeper }
-                continue
-            }
-            if let hash = item.duplicateHash {
-                guard let keeper = all.first(where: { $0.duplicateHash == hash && $0.keeper && !ids.contains($0.id) }) else { throw SafetyError.keeper }
-                try validateLocation(keeper, folders: folders)
-                guard try digest(keeper.url) == hash, try digest(item.url) == hash else { throw SafetyError.changed(item.url.path) }
+            try validate(item, folders: folders, wholeGroups: wholeGroups, readContents: true) { hash in
+                all.first { $0.duplicateHash == hash && $0.keeper && !ids.contains($0.id) }
             }
         }
+    }
+    /// One selected file. `original` returns the protected original of a duplicate group.
+    /// `readContents: false` leaves out the two full reads. Only the whole-batch pass before any
+    /// move does that: each file and its original are read in full again just before that file moves.
+    func validate(_ item: Candidate, folders: [URL], wholeGroups: Set<String>, readContents: Bool,
+                  original: (String) -> Candidate?) throws {
+        try validateLocation(item, folders: folders)
+        if item.keeper {
+            guard let hash = item.duplicateHash, wholeGroups.contains(hash) else { throw SafetyError.keeper }
+            return
+        }
+        guard let hash = item.duplicateHash else { return }
+        guard let keeper = original(hash) else { throw SafetyError.keeper }
+        try validateLocation(keeper, folders: folders)
+        guard readContents else { return }
+        guard try digest(keeper.url) == hash, try digest(item.url) == hash else { throw SafetyError.changed(item.url.path) }
     }
 }
