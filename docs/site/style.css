@@ -159,7 +159,7 @@ details p { font-size: 14px; line-height: 1.75; color: #bdcdd5; margin-bottom: 2
 .maker-links { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
 .maker-destination { display: flex; align-items: flex-start; gap: 22px; padding: 32px; border: 1px solid var(--line); border-radius: 12px; text-decoration: none; }
 .maker-destination:hover { border-color: #8eb9ca; }
-.destination-mark { width: 44px; height: 44px; font-size: 39px; line-height: 1; color: #bb6729; display: grid; place-items: center; flex-shrink: 0; }
+.destination-mark { width: 44px; height: 44px; font-size: 39px; line-height: 1; color: #bb6729; display: grid; place-items: center; flex-shrink: 0; object-fit: contain; }
 .maker-destination h3 { font-size: 21px; margin-bottom: 10px; }
 .maker-destination p { color: var(--muted); font-size: 14px; max-width: 38ch; margin-bottom: 16px; }
 .destination-link { font-size: 13px; font-weight: 650; color: var(--cyan-deep); }
